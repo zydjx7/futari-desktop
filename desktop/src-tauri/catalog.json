@@ -1,0 +1,22 @@
+{
+  "hay": {
+    "name": "提摩西草",
+    "price": 2,
+    "nourishment": 12
+  },
+  "carrot": {
+    "name": "胡萝卜块",
+    "price": 3,
+    "nourishment": 18
+  },
+  "ball": {
+    "name": "柳枝球",
+    "price": 6,
+    "nourishment": 0
+  },
+  "bed": {
+    "name": "亚麻软窝",
+    "price": 12,
+    "nourishment": 0
+  }
+}

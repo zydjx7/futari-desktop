@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FUTARI · 焦糖兔</title>
+    <link rel="stylesheet" href="vendor/room.css" />
+    <link rel="stylesheet" href="vendor/album.css" />
+    <link rel="stylesheet" href="stage.css" />
+    <script type="module" src="stage.js"></script>
+  </head>
+  <body>
+    <canvas id="world" hidden></canvas>
+    <canvas id="pet"></canvas>
+    <div id="camera-host" class="camera-stage" hidden></div>
+    <div id="play-bar" hidden>
+      <span>逗兔互动中 · 点空地移动 · 右键开手账</span>
+      <button type="button" id="exit-play">恢复穿透</button>
+    </div>
+    <div id="selection" hidden>
+      <span>拖出焦糖兔的活动区域</span><button type="button">取消</button><i></i>
+    </div>
+    <div id="food-ghost" class="book-icon" hidden></div>
+  </body>
+</html>
