@@ -27,7 +27,7 @@ jobs:
       - run: rustup update stable && rustup override set stable
       - run: node desktop/scripts/prepare.mjs
       - run: node --test desktop/tests/geometry.test.mjs
-      - run: cargo test --target "$(rustc -vV | sed -n 's/^host: //p')" --locked --release --features cloud-sync --manifest-path desktop/src-tauri/Cargo.toml
+      - run: cargo test --target "$(rustc --print host-tuple)" --locked --release --features cloud-sync --manifest-path desktop/src-tauri/Cargo.toml
       - run: bash desktop/scripts/build-macos.sh --universal
       - name: Verify archived universal application
         run: |
