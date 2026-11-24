@@ -35,7 +35,7 @@ jobs:
           ditto -x -k desktop/dist/FUTARI-Desktop-macOS.zip "$tmp"
           app="$tmp/FUTARI Desktop.app"
           codesign --verify --strict --verbose=2 "$app"
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/futari-desktop"
+          lipo "$app/Contents/MacOS/futari-desktop" -verify_arch arm64 x86_64
           test -x "$app/Contents/MacOS/futari-desktop"
           "$app/Contents/MacOS/futari-desktop" --verify-profile &
           pid=$!
