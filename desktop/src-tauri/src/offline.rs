@@ -5,6 +5,12 @@ use crate::{
 pub struct Cloud;
 const OFFLINE: &str = "这个绿色版使用本机存档";
 impl Cloud {
+    pub async fn manifest(&self) -> Result<crate::updater::Manifest> {
+        Err(OFFLINE.into())
+    }
+    pub async fn bundle(&self, _: &str) -> Result<Vec<u8>> {
+        Err(OFFLINE.into())
+    }
     pub fn new() -> Result<Self> {
         Ok(Self)
     }

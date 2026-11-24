@@ -27,6 +27,8 @@ for (const [source, target] of [
     path.join(rabbit, source + ".client.js"),
     path.join(ui, "vendor", target + ".js"),
   );
+const stationery = path.join(ui, "vendor/stationery.js");
+await writeFile(stationery, (await readFile(stationery,"utf8")).replace("./art/goods.webp","../art/goods.webp"));
 const camera = (
   await readFile(path.join(rabbit, "camera.client.js"), "utf8")
 ).replace('"/app/album/paper.js"', '"./paper.js"');
@@ -40,9 +42,11 @@ const drawers = (
   await readFile(path.join(rabbit, "drawers.client.js"), "utf8")
 ).replace('"/app/album/catalog.js"', '"./catalog.js"');
 await writeFile(path.join(ui, "vendor/drawers.js"), drawers);
+const catalog = JSON.parse(await readFile(path.join(album, "catalog.json"), "utf8"));
+catalog.scenes.desktop = "桌面风景";
 await writeFile(
   path.join(ui, "vendor/catalog.js"),
-  "export default " + (await readFile(path.join(album, "catalog.json"), "utf8")),
+  "export default " + JSON.stringify(catalog),
 );
 const css = (await readFile(path.join(rabbit, "room.css"), "utf8"))
   .replaceAll("/app/rabbit/art/", "../art/")
@@ -52,7 +56,7 @@ const albumCss = (
   await readFile(path.join(album, "album.css"), "utf8")
 ).replaceAll("/app/album/paper.webp", "../art/paper.webp");
 await writeFile(path.join(ui, "vendor/album.css"), albumCss);
-for (const name of ["caramel", "actions", "stationery", "paper", "photography"])
+for (const name of ["caramel", "actions", "goods", "stationery", "paper", "photography"])
   await copyFile(
     path.join(rabbit, "art", name + ".webp"),
     path.join(ui, "art", name + ".webp"),

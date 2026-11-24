@@ -9,9 +9,10 @@ fn main() {
             .compile("futari_appkit");
         for framework in [
             "AppKit",
-            "WebKit",
             "Carbon",
+            "WebKit",
             "CoreGraphics",
+            "ApplicationServices",
             "CoreImage",
             "QuartzCore",
         ] {
@@ -20,7 +21,17 @@ fn main() {
     }
     let commands = &[
         "desktop_view",
+        "update_status",
+        "check_update",
+        "apply_ui_update",
+
+        "ui_bundle_info",
+        "ui_bundle_rollback",
+
+        "focused_shortcut",
+        "capture_desktop",
         "update_hit",
+        "furniture_contact",
         "close_notebook",
         "report_scene",
         "scene_list",

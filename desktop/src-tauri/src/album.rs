@@ -18,7 +18,7 @@ pub const NOTES: [&str; 23] = [
     "stretch", "flop", "nudge", "alert", "tilt", "peek", "rest", "hop", "tunnel", "listen",
     "quiet", "scenery",
 ];
-pub const SCENES: [&str; 2] = ["paper", "snow"];
+pub const SCENES: [&str; 3] = ["paper", "snow", "desktop"];
 pub const LIGHTS: [&str; 3] = ["day", "dusk", "night"];
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]

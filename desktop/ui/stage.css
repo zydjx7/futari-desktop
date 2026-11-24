@@ -33,37 +33,15 @@ canvas {
   color: inherit;
   font: inherit;
 }
+.desktop-camera .finder-floor {
+  background: rgba(0, 0, 0, 0.01);
+}
+.desktop-camera .finder-frame {
+  cursor: crosshair;
+}
 #camera-host :focus-visible {
   outline: 2px solid #987144;
   outline-offset: 2px;
-}
-#play-bar {
-  position: fixed;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 14px;
-  border: 1px solid #ab896d;
-  border-radius: 18px;
-  background: #faf3e6f2;
-  color: #513b2d;
-  font:
-    13px "Microsoft YaHei",
-    sans-serif;
-  box-shadow: 0 4px 16px #513b2d2e;
-}
-#play-bar button {
-  cursor: pointer;
-  border: 1px solid #9e7657;
-  border-radius: 12px;
-  padding: 3px 10px;
-  background: #e9bd92;
-  color: #4e392b;
-  font: inherit;
 }
 #selection {
   position: fixed;

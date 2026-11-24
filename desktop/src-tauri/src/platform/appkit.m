@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
-#import <WebKit/WebKit.h>
 #import <Carbon/Carbon.h>
+#import <WebKit/WebKit.h>
+#import <ApplicationServices/ApplicationServices.h>
 #import <CoreImage/CoreImage.h>
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
@@ -150,6 +151,54 @@ bool ft_desktop(void) {
     });
     return result;
 }
+// Observe Finder's original event while leaving the stage click-through.
+void ft_ground(bool enabled) {
+    static id monitor;
+    mainSync(^{
+        if (!enabled) {
+            if (monitor) [NSEvent removeMonitor:monitor];
+            monitor=nil;
+            return;
+        }
+        if (monitor) return;
+        __block BOOL candidate=NO;
+        monitor=[NSEvent addGlobalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown |
+            NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp) handler:^(NSEvent *e) {
+            if (e.type==NSEventTypeLeftMouseDown) {
+                candidate=e.clickCount==1 && !(e.modifierFlags & (NSEventModifierFlagOption |
+                    NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagShift));
+                return;
+            }
+            if (e.type==NSEventTypeLeftMouseDragged) { candidate=NO; return; }
+            if (!candidate || !e.CGEvent) return;
+            candidate=NO;
+            CGWindowID wid=(CGWindowID)CGEventGetIntegerValueField(e.CGEvent,kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent);
+            NSArray *info=CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,wid));
+            NSDictionary *w=info.firstObject;
+            if (!w || [w[(__bridge NSString *)kCGWindowLayer] intValue]!=CGWindowLevelForKey(kCGDesktopIconWindowLevelKey)) return;
+            pid_t pid=[w[(__bridge NSString *)kCGWindowOwnerPID] intValue];
+            if (![[NSRunningApplication runningApplicationWithProcessIdentifier:pid].bundleIdentifier isEqualToString:@"com.apple.finder"]) return;
+            CGPoint at=CGEventGetLocation(e.CGEvent);
+            NSPoint p=NSMakePoint(at.x,NSMaxY(NSScreen.screens.firstObject.frame)-at.y);
+            if (!NSPointInRect(p,target().visibleFrame)) return;
+            if (AXIsProcessTrusted()) {
+                AXUIElementRef finder=AXUIElementCreateApplication(pid), hit=NULL;
+                AXUIElementCopyElementAtPosition(finder,at.x,at.y,&hit);
+                CFRelease(finder);
+                if (hit) {
+                    CFTypeRef role=NULL;
+                    AXUIElementCopyAttributeValue(hit,kAXRoleAttribute,&role);
+                    CFRelease(hit);
+                    BOOL icon=role && (CFEqual(role,CFSTR("AXImage")) || CFEqual(role,CFSTR("AXButton"))
+                        || CFEqual(role,CFSTR("AXTextField")) || CFEqual(role,CFSTR("AXStaticText")));
+                    if (role) CFRelease(role);
+                    if (icon) return;
+                }
+            }
+            notifyRust(11,p.x,p.y);
+        }];
+    });
+}
 static WKWebView *webview(NSView *v){
     if([v isKindOfClass:WKWebView.class])return (WKWebView *)v;
     for(NSView *child in v.subviews){WKWebView *found=webview(child);if(found)return found;}
@@ -171,7 +220,31 @@ static CIFilter *matteFilter(void){
     [filter setValue:@(n) forKey:@"inputCubeDimension"];[filter setValue:data forKey:@"inputCubeData"];
     return filter;
 }
-void ft_present(intptr_t window,bool visible,bool active,bool top,bool below,bool desktop) {
+void ft_wallpaper(intptr_t window,bool visible,bool above) {
+    mainSync(^{
+        NSWindow *w=(__bridge NSWindow *)(void *)window;
+        if(!visible){[w orderOut:nil];return;}
+        w.ignoresMouseEvents=YES;w.hasShadow=NO;
+        w.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorStationary|NSWindowCollectionBehaviorIgnoresCycle;
+        w.level=CGWindowLevelForKey(above ? kCGDesktopIconWindowLevelKey : kCGDesktopWindowLevelKey)+1;
+        [w setFrame:target().frame display:YES];[w orderFrontRegardless];
+    });
+}
+void ft_furnishings(intptr_t window,bool visible) {
+    mainSync(^{
+        NSWindow *w=(__bridge NSWindow *)(void *)window;
+        if (!visible) { [w orderOut:nil]; return; }
+        if (!w.contentView.contentFilters.count) {
+            WKWebView *web=webview(w.contentView);
+            web.underPageBackgroundColor=NSColor.clearColor;
+            w.opaque=NO; w.backgroundColor=NSColor.clearColor;
+            w.contentView.wantsLayer=YES;
+            w.contentView.contentFilters=@[matteFilter()];
+        }
+        ft_wallpaper(window,true,true);
+    });
+}
+void ft_present(intptr_t window,bool visible,bool active,bool top,bool desktop) {
     mainSync(^{
         NSWindow *w=(__bridge NSWindow *)(void *)window;
         BOOL fresh=stage!=w;
@@ -196,9 +269,9 @@ void ft_present(intptr_t window,bool visible,bool active,bool top,bool below,boo
             w.contentView.wantsLayer=YES;
             w.contentView.contentFilters=@[matteFilter()];
         }
-        w.level=top ? NSFloatingWindowLevel : CGWindowLevelForKey(below ? kCGDesktopWindowLevelKey : kCGDesktopIconWindowLevelKey)+1;
+        w.level=top ? NSFloatingWindowLevel : CGWindowLevelForKey(kCGDesktopIconWindowLevelKey)+2;
         [w setFrame:target().frame display:YES];
-        if(active){[NSApp activateIgnoringOtherApps:YES];[w makeKeyAndOrderFront:nil];}
+        if(active && (top || ft_desktop())){[NSApp activateIgnoringOtherApps:YES];[w makeKeyAndOrderFront:nil];}
         else [w orderFrontRegardless];
     });
 }
@@ -222,11 +295,6 @@ bool ft_folder(const char *path){
     });
     return result;
 }
-static OSStatus hotkey(EventHandlerCallRef next,EventRef event,void *ctx){
-    EventHotKeyID id={0};
-    if(GetEventParameter(event,kEventParamDirectObject,typeEventHotKeyID,NULL,sizeof(id),NULL,&id)!=noErr || id.signature!='Futa')return eventNotHandledErr;
-    notifyRust(id.id,0,0);return noErr;
-}
 static void observe(NSNotificationCenter *center,NSString *name,void (^action)(void)){
     [center addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){action();}];
 }
@@ -235,7 +303,16 @@ static void lockReason(unsigned bit,BOOL on) {
     if(on)locks|=bit;else locks&=~bit;
     if(!!previous!=!!locks)notifyRust(9,locks!=0,0);
 }
-void ft_install(void (*callback)(int,double,double),int keys[2]){
+static OSStatus shortcutPressed(EventHandlerCallRef next, EventRef event, void *context) {
+    EventHotKeyID key;
+    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL,
+                          sizeof(key), NULL, &key) != noErr || key.signature != 'Futa' || key.id > 1)
+        return eventNotHandledErr;
+    notifyRust(key.id, 0, 0);
+    return noErr;
+}
+
+void ft_install(void (*callback)(int,double,double), int registered[2]){
     notifyRust=callback;
     // Tauri sets the Accessory policy during setup, before its launch callbacks.
     screen=NSScreen.mainScreen;
@@ -246,13 +323,14 @@ void ft_install(void (*callback)(int,double,double),int keys[2]){
     hitPanel.backgroundColor=NSColor.clearColor;
     hitPanel.hasShadow=NO;hitPanel.hidesOnDeactivate=NO;hitPanel.ignoresMouseEvents=YES;
     hitPanel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorIgnoresCycle;
-    EventTypeSpec type={kEventClassKeyboard,kEventHotKeyPressed};
-    if(InstallApplicationEventHandler(hotkey,1,&type,NULL,NULL)==noErr){
-        UInt32 codes[]={kVK_ANSI_Q,kVK_ANSI_W}, mods[]={optionKey,controlKey|optionKey,controlKey|optionKey|shiftKey};
+    EventTypeSpec pressed = { kEventClassKeyboard, kEventHotKeyPressed };
+    if (InstallApplicationEventHandler(shortcutPressed, 1, &pressed, NULL, NULL) == noErr) {
+        const UInt32 codes[] = { kVK_ANSI_J, kVK_ANSI_K };
         static EventHotKeyRef refs[2];
-        for(UInt32 i=0;i<2;i++)for(int j=0;j<3;j++){
-            EventHotKeyID id={'Futa',i};
-            if(RegisterEventHotKey(codes[i],mods[j],id,GetApplicationEventTarget(),0,&refs[i])==noErr){keys[i]=j;break;}
+        for (UInt32 i = 0; i < 2; i++) {
+            EventHotKeyID key = { 'Futa', i };
+            registered[i] = RegisterEventHotKey(codes[i], optionKey,
+                key, GetApplicationEventTarget(), kEventHotKeyExclusive, &refs[i]) == noErr;
         }
     }
     NSNotificationCenter *ws=NSWorkspace.sharedWorkspace.notificationCenter;

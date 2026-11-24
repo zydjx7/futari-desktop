@@ -89,6 +89,10 @@ pub struct Settings {
     #[serde(default = "default_atmosphere")]
     pub atmosphere: String,
     pub wallpaper: bool,
+    pub wallpaper_above_icons: bool,
+    pub auto_rest: bool,
+    pub rabbit_scale: u16,
+    pub prop_scale: u16,
     pub cloud: bool,
 }
 impl Default for Settings {
@@ -101,25 +105,52 @@ impl Default for Settings {
             scene: "clear".into(),
             atmosphere: default_atmosphere(),
             wallpaper: false,
+            wallpaper_above_icons: false,
+            auto_rest: true,
+            rabbit_scale: 100,
+            prop_scale: 100,
             cloud: false,
         }
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Item {
-    Hay,
-    Carrot,
-    Ball,
-    Bed,
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ItemId(pub String);
+impl TryFrom<String> for ItemId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self> {
+        if value.len() <= 32
+            && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        {
+            Ok(Self(value))
+        } else {
+            Err("商品编号无效".into())
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Product {
     pub name: String,
     pub price: i64,
     pub nourishment: u32,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub slot: Option<String>,
 }
-pub fn catalog() -> BTreeMap<Item, Product> {
+pub fn catalog() -> BTreeMap<ItemId, Product> {
+    load_catalog(crate::updater::active_file("catalog.json").as_deref())
+}
+fn load_catalog(path: Option<&Path>) -> BTreeMap<ItemId, Product> {
+    if let Some(c) = path
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+    {
+        return c;
+    }
     serde_json::from_str(include_str!("../catalog.json")).expect("packaged shop catalog")
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -130,9 +161,9 @@ pub struct Home {
     pub atmosphere: String,
     pub balance: i64,
     pub satiety: u32,
-    pub inventory: BTreeMap<Item, u32>,
-    pub placed: Vec<Item>,
-    pub shop: BTreeMap<Item, Product>,
+    pub inventory: BTreeMap<ItemId, u32>,
+    pub placed: Vec<ItemId>,
+    pub shop: BTreeMap<ItemId, Product>,
     pub unread: u32,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -161,7 +192,9 @@ pub enum Act {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Action {
     pub kind: Act,
-    pub item: Option<Item>,
+    pub item: Option<ItemId>,
+    #[serde(default)]
+    pub placed: Option<bool>,
     pub request_id: Uuid,
     pub letter: Option<i64>,
 }
@@ -170,8 +203,8 @@ struct Savings {
     #[serde(default = "default_name")]
     name: String,
     balance: i64,
-    stock: BTreeMap<Item, u32>,
-    placed: Vec<Item>,
+    stock: BTreeMap<ItemId, u32>,
+    placed: Vec<ItemId>,
     satiety: u32,
     fed: u64,
     pet_day: Option<u64>,
@@ -184,7 +217,7 @@ impl Default for Savings {
         Self {
             name: default_name(),
             balance: 6,
-            stock: [(Item::Hay, 2), (Item::Carrot, 1)].into(),
+            stock: [(ItemId("hay".into()), 2), (ItemId("carrot".into()), 1)].into(),
             placed: vec![],
             satiety: 45,
             fed: 0,
@@ -221,7 +254,16 @@ impl Store {
             .map_err(|_| "这个兔窝已经打开，或存档目录无法加锁。".to_string())?;
         let disk = match fs::read(root.join("nest.json")) {
             Ok(v) => {
-                serde_json::from_slice(&v).map_err(|_| "存档无法读取，原文件已保留。".to_owned())?
+                let raw: serde_json::Value = serde_json::from_slice(&v)
+                    .map_err(|_| "存档无法读取，原文件已保留。".to_owned())?;
+                let legacy_layer = raw["settings"].get("wallpaper_above_icons").is_none();
+                let mut disk: Disk = serde_json::from_value(raw)
+                    .map_err(|_| "存档无法读取，原文件已保留。".to_owned())?;
+                if legacy_layer {
+                    // Before 0.2.2 the background was rendered only by the desktop rabbit.
+                    disk.settings.wallpaper = disk.settings.mode == Mode::Desktop && disk.settings.scene != "clear";
+                }
+                disk
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Disk::default(),
             Err(e) => return Err(e.to_string()),
@@ -290,7 +332,7 @@ impl Store {
         self.observed = clock;
         Ok(())
     }
-    pub fn placed(&self) -> &[Item] {
+    pub fn placed(&self) -> &[ItemId] {
         &self.disk.rabbit.placed
     }
     pub fn name(&self) -> &str {
@@ -338,9 +380,9 @@ impl Store {
             }
             Act::OpenLetter => return Err("本机没有这封信".into()),
             _ => {
-                let i = a.item.ok_or("请选择物品")?;
+                let i = a.item.clone().ok_or("请选择物品")?;
                 let catalog = catalog();
-                let p = &catalog[&i];
+                let p = catalog.get(&i).ok_or("商品未上架")?;
                 let qty = *s.stock.get(&i).unwrap_or(&0);
                 match a.kind {
                     Act::Buy => {
@@ -369,7 +411,13 @@ impl Store {
                         if p.nourishment != 0 || qty == 0 {
                             return Err("先把这件摆设带回家".into());
                         }
-                        if !s.placed.contains(&i) {
+                        s.placed.retain(|other| {
+                            other != &i
+                                && !(a.placed.unwrap_or(true)
+                                    && p.slot.is_some()
+                                    && catalog.get(other).is_some_and(|v| v.slot == p.slot))
+                        });
+                        if a.placed.unwrap_or(true) {
                             s.placed.push(i);
                         }
                     }
@@ -394,6 +442,79 @@ fn fullness(s: &Savings, t: u64) -> u32 {
 mod tests {
     use super::*;
     #[test]
+    fn migrate_wallpaper_from_the_previous_combined_desktop_mode() {
+        for (mode, scene, behind, expected) in [
+            (Mode::Overlay, "snow-forest", true, false),
+            (Mode::Desktop, "snow-forest", false, true),
+            (Mode::Desktop, "clear", true, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut old = serde_json::to_value(Disk::default()).unwrap();
+            let settings = old["settings"].as_object_mut().unwrap();
+            settings.remove("wallpaper_above_icons");
+            settings.insert("mode".into(), serde_json::to_value(mode).unwrap());
+            settings.insert("scene".into(), scene.into());
+            settings.insert("wallpaper".into(), behind.into());
+            fs::write(dir.path().join("nest.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+            let store = Store::open(dir.path(), 0).unwrap();
+            assert_eq!(store.settings().wallpaper, expected);
+            assert!(!store.settings().wallpaper_above_icons);
+            assert_eq!(store.settings().mode, mode);
+        }
+    }
+    #[test]
+    fn catalog_override_and_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("catalog.json");
+        std::fs::write(&p, r#"{"mint":{"name":"薄荷","price":5,"nourishment":3}}"#).unwrap();
+        assert!(load_catalog(Some(&p)).contains_key(&ItemId("mint".into())));
+        std::fs::write(&p, "{").unwrap();
+        assert!(load_catalog(Some(&p)).contains_key(&ItemId("hay".into())));
+    }
+    #[test]
+    fn legacy_inventory_and_nest_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::open(dir.path(), 0).unwrap();
+        let mut old = serde_json::to_value(&s.disk).unwrap();
+        old["rabbit"]["stock"] =
+            serde_json::json!({"hay":2,"bed":1,"ball":1,"toastbed":1,"knitbed":1});
+        old["rabbit"]["placed"] = serde_json::json!(["ball", "bed"]);
+        drop(s);
+        std::fs::write(
+            dir.path().join("nest.json"),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        s = Store::open(dir.path(), 0).unwrap();
+        for (id, on) in [
+            ("toastbed", None),
+            ("knitbed", Some(true)),
+            ("knitbed", Some(false)),
+        ] {
+            s.act(
+                &Action {
+                    kind: Act::Place,
+                    item: Some(ItemId(id.into())),
+                    request_id: Uuid::new_v4(),
+                    placed: on,
+                    letter: None,
+                },
+                100,
+            )
+            .unwrap();
+            let items = s.placed().iter().map(|i| i.0.as_str()).collect::<Vec<_>>();
+            assert_eq!(
+                items,
+                if on == Some(false) {
+                    vec!["ball"]
+                } else {
+                    vec!["ball", id]
+                }
+            );
+        }
+        assert!(serde_json::from_str::<ItemId>(r#""../bad""#).is_err());
+    }
+    #[test]
     fn restart_retry_and_cap() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = Store::open(dir.path(), 0).unwrap();
@@ -404,7 +525,8 @@ mod tests {
         assert_eq!(s.home(t).balance, 18);
         let a = Action {
             kind: Act::Buy,
-            item: Some(Item::Carrot),
+            item: Some(ItemId("carrot".into())),
+            placed: None,
             request_id: Uuid::new_v4(),
             letter: None,
         };
@@ -413,7 +535,7 @@ mod tests {
         let mut s = Store::open(dir.path(), 9000).unwrap();
         s.act(&a, t).unwrap();
         assert_eq!(s.home(t).balance, 15);
-        assert_eq!(s.home(t).inventory[&Item::Carrot], 2);
+        assert_eq!(s.home(t).inventory[&ItemId("carrot".into())], 2);
         assert!(Store::open(dir.path(), 0).is_err());
     }
     #[test]

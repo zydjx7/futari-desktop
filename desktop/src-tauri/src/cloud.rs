@@ -37,7 +37,13 @@ fn permitted_album_query(query: &str) -> bool {
 }
 fn permitted(method: &Method, path: &str) -> bool {
     if method == Method::GET {
-        if matches!(path, "state" | "mail" | "album") {
+        if path
+            .strip_prefix("update/ui/")
+            .is_some_and(crate::updater::version)
+        {
+            return true;
+        }
+        if matches!(path, "update/manifest" | "state" | "mail" | "album") {
             return true;
         }
         if let Some(s) = path.strip_prefix("mail?before=") {
@@ -131,6 +137,44 @@ pub struct Cloud {
     client: Client,
 }
 impl Cloud {
+    pub async fn manifest(&self) -> Result<crate::updater::Manifest> {
+        self.request(
+            Method::GET,
+            "update/manifest",
+            None::<&()>,
+            Some(&credential()?),
+        )
+        .await
+    }
+    pub async fn bundle(&self, version: &str) -> Result<Vec<u8>> {
+        let path = format!("update/ui/{version}");
+        if !permitted(&Method::GET, &path) {
+            return Err("版本无效".into());
+        }
+        let mut r = self
+            .client
+            .get(format!("{BRIDGE}/v1/{path}"))
+            .bearer_auth(credential()?)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !r.status().is_success()
+            || r.headers().get(CONTENT_TYPE).and_then(|h| h.to_str().ok())
+                != Some("application/zip")
+            || r.content_length()
+                .is_some_and(|n| n > crate::updater::LIMIT as u64)
+        {
+            return Err("资源包响应无效".into());
+        }
+        let mut bytes = vec![];
+        while let Some(chunk) = r.chunk().await.map_err(|e| e.to_string())? {
+            if bytes.len() + chunk.len() > crate::updater::LIMIT {
+                return Err("资源包过大".into());
+            }
+            bytes.extend_from_slice(&chunk)
+        }
+        Ok(bytes)
+    }
     pub fn new() -> Result<Self> {
         Ok(Self {
             client: Client::builder()
@@ -272,7 +316,15 @@ impl Cloud {
             ("id", meta.id.as_str()),
             ("captured", captured.as_str()),
             ("offset", offset.as_str()),
-            ("scene", meta.scene.as_str()),
+            // The cloud album currently accepts only its two original scene identifiers.
+            (
+                "scene",
+                if meta.scene == "desktop" {
+                    "paper"
+                } else {
+                    &meta.scene
+                },
+            ),
             ("light", meta.light.as_str()),
             ("pose", meta.pose.as_str()),
             ("title", title.as_str()),
@@ -477,7 +529,10 @@ impl Cloud {
             Act::Place => "place",
             Act::OpenLetter => "open-letter",
         };
-        let args = serde_json::json!({"item":a.item,"request_id":a.request_id,"id":a.letter});
+        let mut args = serde_json::json!({"item":a.item,"request_id":a.request_id,"id":a.letter});
+        if let Some(on) = a.placed {
+            args["placed"] = on.into();
+        }
         let r: OkReply = self
             .request(Method::POST, path, Some(&args), Some(&credential()?))
             .await?;

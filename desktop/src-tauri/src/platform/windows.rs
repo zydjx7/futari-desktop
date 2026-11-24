@@ -63,13 +63,6 @@ unsafe extern "system" fn foreground(
 unsafe extern "system" fn proc(w: HWND, m: u32, a: WPARAM, b: LPARAM) -> LRESULT {
     match m {
         WM_MOUSEACTIVATE => return MA_NOACTIVATE as isize,
-        WM_HOTKEY => {
-            if a == 1 {
-                send(NativeEvent::Toggle)
-            } else if a == 2 {
-                send(NativeEvent::Switch)
-            }
-        }
         WM_DISPLAYCHANGE | WM_SETTINGCHANGE => send(NativeEvent::Display),
         WM_WTSSESSION_CHANGE => {
             if a == WTS_SESSION_LOCK as usize || a == WTS_SESSION_UNLOCK as usize {
@@ -94,14 +87,24 @@ unsafe extern "system" fn proc(w: HWND, m: u32, a: WPARAM, b: LPARAM) -> LRESULT
             send(NativeEvent::Card(p.x, p.y));
         }
         WM_MOUSEMOVE => {
+            let p = cursor();
             if let Some((x, y, drag)) = DOWN.get() {
-                let p = cursor();
                 if drag || (p.x - x).abs() + (p.y - y).abs() > 5 {
                     DOWN.set(Some((x, y, true)));
                     if !drag {
                         send(NativeEvent::DragStart(x, y));
                     }
                     send(NativeEvent::Drag(p.x, p.y));
+                }
+            } else {
+                use std::sync::atomic::AtomicU64;
+                static LAST_HOVER: AtomicU64 = AtomicU64::new(0);
+                let mut now = 0u64;
+                QueryUnbiasedInterruptTime(&mut now);
+                let prev = LAST_HOVER.load(Ordering::Relaxed);
+                if now.saturating_sub(prev) >= 250_000 {
+                    LAST_HOVER.store(now, Ordering::Relaxed);
+                    send(NativeEvent::Hover(p.x, p.y));
                 }
             }
         }
@@ -126,11 +129,180 @@ unsafe extern "system" fn proc(w: HWND, m: u32, a: WPARAM, b: LPARAM) -> LRESULT
     }
     0
 }
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+static WALK: AtomicBool = AtomicBool::new(false);
+static PLAY_CAPTURE: AtomicBool = AtomicBool::new(false);
+static ALT_HOOK_MASK: AtomicU8 = AtomicU8::new(0);
+// The stage stays click-through. Only ask Explorer about completed clicks on its desktop.
+const WM_GROUND_MODE: u32 = WM_APP + 42;
+static GROUND_POINTS: OnceLock<std::sync::mpsc::SyncSender<(i32, i32)>> = OnceLock::new();
+thread_local! { static GROUND_DOWN: Cell<Option<(i32, i32)>> = const { Cell::new(None) }; }
+
+unsafe fn desktop_at(p: POINT) -> bool {
+    let hit = WindowFromPoint(p);
+    let root = GetAncestor(hit, GA_ROOT);
+    if !matches!(cname(root).as_str(), "Progman" | "WorkerW") { return false; }
+    let mut pid = 0;
+    let mut shell = 0;
+    GetWindowThreadProcessId(root, &mut pid);
+    GetWindowThreadProcessId(GetShellWindow(), &mut shell);
+    pid != 0 && pid == shell && matches!(cname(hit).as_str(),
+        "SysListView32" | "SHELLDLL_DefView" | "WorkerW" | "Progman")
+}
+
+unsafe extern "system" fn ground_hook(code: i32, msg: WPARAM, data: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 && PLAY_CAPTURE.load(Ordering::Relaxed) && data != 0 {
+        let p = (*(data as *const MSLLHOOKSTRUCT)).pt;
+        match msg as u32 {
+            WM_LBUTTONDOWN => {
+                let plain = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN].iter()
+                    .all(|k| GetAsyncKeyState(i32::from(*k)) >= 0);
+                GROUND_DOWN.set((plain && desktop_at(p)).then_some((p.x,p.y)));
+            }
+            WM_MOUSEMOVE => {
+                if GROUND_DOWN.get().is_some_and(|(x,y)| (x-p.x).abs().max((y-p.y).abs()) > 4) {
+                    GROUND_DOWN.set(None);
+                }
+            }
+            WM_LBUTTONUP => {
+                if GROUND_DOWN.take().is_some() && desktop_at(p) {
+                    if let Some(tx) = GROUND_POINTS.get() { let _ = tx.try_send((p.x,p.y)); }
+                }
+            }
+            _ => (),
+        }
+    }
+    CallNextHookEx(null_mut(), code, msg, data)
+}
+fn ground_listener() -> Result<()> {
+    use ::windows::Win32::{Foundation::POINT as ScreenPoint,
+        System::{Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED}, Variant::VARIANT},
+        UI::Accessibility::{AccessibleObjectFromPoint, ROLE_SYSTEM_LIST, ROLE_SYSTEM_PANE, ROLE_SYSTEM_CLIENT}};
+    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+    std::thread::Builder::new().name("desktop-ground".into()).spawn(move || unsafe {
+        if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() { return; }
+        for (x,y) in rx {
+            if !PLAY_CAPTURE.load(Ordering::Relaxed) || !desktop_at(POINT {x,y}) { continue; }
+            let mut object = None;
+            let mut child = VARIANT::default();
+            if AccessibleObjectFromPoint(ScreenPoint {x,y}, &mut object, &mut child).is_err() { continue; }
+            let role = object.and_then(|o| o.get_accRole(&child).ok())
+                .and_then(|v| i32::try_from(&v).ok()).map(|v| v as u32);
+            if matches!(role, Some(ROLE_SYSTEM_LIST | ROLE_SYSTEM_PANE | ROLE_SYSTEM_CLIENT)) {
+                send(NativeEvent::Ground(x,y));
+            }
+        }
+        CoUninitialize();
+    }).map_err(|e| e.to_string())?;
+    GROUND_POINTS.set(tx).map_err(|_| "重复安装桌面点击监听".to_string())
+}
+// A normal release or a fresh Alt chord clears typematic suppression immediately.
+// The deadline also recovers if the hook misses both releases during a focus change.
+thread_local! { static REPEAT_UNTIL: Cell<[Option<Instant>; 2]> = const { Cell::new([None; 2]) }; }
+unsafe extern "system" fn key_hook(code: i32, a: WPARAM, b: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 && b != 0 {
+        let kb = &*(b as *const KBDLLHOOKSTRUCT);
+        let msg = a as u32;
+        if kb.vkCode == u32::from(VK_ESCAPE) && matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN)
+            && WALK.load(Ordering::Relaxed)
+            && matches!(cname(GetForegroundWindow()).as_str(), "Progman" | "WorkerW")
+            && PLAY_CAPTURE.load(Ordering::Relaxed)
+        {
+            send(NativeEvent::ExitPlay);
+            return 1;
+        }
+        if matches!(kb.vkCode as u16, VK_MENU | VK_LMENU | VK_RMENU) {
+            REPEAT_UNTIL.set([None; 2]);
+        } else if let Some(key) = match kb.vkCode {
+            v if v == u32::from(b'Q') => Some(Shortcut::Toggle),
+            v if v == u32::from(b'W') => Some(Shortcut::Switch),
+            _ => None,
+        } {
+            let index = key as usize;
+            let mut repeat = REPEAT_UNTIL.get();
+            if msg == WM_KEYUP || msg == WM_SYSKEYUP {
+                repeat[index] = None;
+                REPEAT_UNTIL.set(repeat);
+            } else if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+                && (ALT_HOOK_MASK.load(Ordering::Relaxed) & (1 << index)) != 0
+                && (kb.flags & LLKHF_ALTDOWN) != 0
+                && GetAsyncKeyState(i32::from(VK_CONTROL)) >= 0
+                && GetAsyncKeyState(i32::from(VK_SHIFT)) >= 0
+                && GetAsyncKeyState(i32::from(VK_LWIN)) >= 0
+                && GetAsyncKeyState(i32::from(VK_RWIN)) >= 0
+            {
+                let now = Instant::now();
+                if repeat[index].is_none_or(|until| now >= until) {
+                    if let Some(tx) = EVENTS.get() {
+                        key.dispatch(tx);
+                    }
+                }
+                repeat[index] = Some(now + Duration::from_millis(1200));
+                REPEAT_UNTIL.set(repeat);
+                return 1;
+            }
+        }
+    }
+    CallNextHookEx(null_mut(), code, a, b)
+}
+// Keep the shortcut message pump independent from WebView focus changes and menus.
+fn keyboard_listener() -> Result<(u32, [Option<String>; 2])> {
+    ground_listener()?;
+    let (ready, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new().name("futari-shortcuts".into()).spawn(move || unsafe {
+        let mut msg = MSG::default();
+        PeekMessageW(&mut msg, null_mut(), 0, 0, PM_NOREMOVE);
+        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), null_mut(), 0);
+        let mut mouse: HHOOK = null_mut();
+        let register = |id, key: u8, bit| {
+            let registered = RegisterHotKey(null_mut(), id, MOD_ALT | MOD_NOREPEAT, u32::from(key)) != 0;
+            if !hook.is_null() {
+                ALT_HOOK_MASK.fetch_or(bit, Ordering::Relaxed);
+            }
+            if registered || !hook.is_null() {
+                return Some(format!("Alt+{}", char::from(key)));
+            }
+            (RegisterHotKey(null_mut(), id, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT,
+                            u32::from(key)) != 0).then(|| format!("Ctrl+Alt+Shift+{}", char::from(key)))
+        };
+        let keys = [register(1, b'Q', 1), register(2, b'W', 2)];
+        let id = windows_sys::Win32::System::Threading::GetCurrentThreadId();
+        if ready.send((id, keys)).is_ok() {
+            while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+                if msg.message == WM_GROUND_MODE {
+                    GROUND_DOWN.set(None);
+                    if PLAY_CAPTURE.load(Ordering::Relaxed) && mouse.is_null() {
+                        mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(ground_hook), null_mut(), 0);
+                        if mouse.is_null() { send(NativeEvent::ExitPlay); }
+                    } else if !PLAY_CAPTURE.load(Ordering::Relaxed) && !mouse.is_null() {
+                        UnhookWindowsHookEx(mouse);
+                        mouse = null_mut();
+                    }
+                } else if msg.message == WM_HOTKEY {
+                    if let Some(tx) = EVENTS.get() {
+                        match msg.wParam {
+                            1 => Shortcut::Toggle.dispatch(tx),
+                            2 => Shortcut::Switch.dispatch(tx),
+                            _ => (),
+                        }
+                    }
+                }
+            }
+        }
+        if !mouse.is_null() { UnhookWindowsHookEx(mouse); }
+        UnregisterHotKey(null_mut(), 1);
+        UnregisterHotKey(null_mut(), 2);
+        if !hook.is_null() { UnhookWindowsHookEx(hook); }
+        ALT_HOOK_MASK.store(0, Ordering::Relaxed);
+    }).map_err(|e| e.to_string())?;
+    receiver.recv().map_err(|e| e.to_string())
+}
 pub struct Native {
+    #[allow(dead_code)]
     desktop_foreground: AtomicBool,
     hit: isize,
     hook: isize,
+    key_thread: u32,
     keys: [Option<String>; 2],
 }
 fn rect(r: RECT) -> Rect {
@@ -188,23 +360,73 @@ unsafe fn above(w: HWND, anchor: HWND) -> (HWND, u32) {
     let prev = GetWindow(anchor, GW_HWNDPREV);
     if prev == w {
         (HWND_TOP, SWP_NOZORDER)
-    } else if prev.is_null() {
+    } else if prev.is_null() || GetWindowLongPtrW(prev, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0 {
         (HWND_TOP, 0)
     } else {
         (prev, 0)
     }
+}
+// A non-activating overlay can still own the foreground after play or camera mode.
+unsafe fn release_stage_focus(stage: HWND) {
+    if GetForegroundWindow() != stage {
+        return;
+    }
+    let mut next = GetTopWindow(null_mut());
+    while !next.is_null() {
+        let mut owner = 0;
+        GetWindowThreadProcessId(next, &mut owner);
+        let ex = GetWindowLongPtrW(next, GWL_EXSTYLE) as u32;
+        if owner != std::process::id()
+            && IsWindowVisible(next) != 0
+            && IsIconic(next) == 0
+            && ex & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) == 0
+            && SetForegroundWindow(next) != 0
+        {
+            return;
+        }
+        next = GetWindow(next, GW_HWNDNEXT);
+    }
+    SetForegroundWindow(GetShellWindow());
+}
+unsafe fn valid_worker(w: HWND) -> HWND {
+    if w.is_null() {
+        return null_mut();
+    }
+    if IsWindowVisible(w) == 0 {
+        ShowWindow(w, SW_SHOWNA);
+    }
+    let mut r = RECT::default();
+    if GetWindowRect(w, &mut r) == 0 || r.right <= r.left || r.bottom <= r.top || IsWindowVisible(w) == 0
+    {
+        return null_mut();
+    }
+    w
 }
 unsafe fn wallpaper_host() -> HWND {
     let prog = FindWindowW(wide("Progman").as_ptr(), null());
     if prog.is_null() {
         return null_mut();
     }
-    // Ask Explorer to provide its wallpaper surface. The icon host is never reparented.
+    let existing = existing_wallpaper_host(prog);
+    if !existing.is_null() { return existing; }
     let mut result = 0;
     SendMessageTimeoutW(prog, 0x052c, 0xd, 1, SMTO_ABORTIFHUNG, 250, &mut result);
-    if !find_child(prog, "SHELLDLL_DefView").is_null() {
-        let child = find_child(prog, "WorkerW");
+    existing_wallpaper_host(prog)
+}
+unsafe fn existing_wallpaper_host(prog: HWND) -> HWND {
+    let def_view = find_child(prog, "SHELLDLL_DefView");
+    if !def_view.is_null() {
+        let child = valid_worker(find_child(prog, "WorkerW"));
         if !child.is_null() {
+            SetWindowPos(
+                child,
+                def_view,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
             return child;
         }
     }
@@ -229,9 +451,22 @@ unsafe fn wallpaper_host() -> HWND {
             return null_mut();
         }
     }
-    out
+    valid_worker(out)
 }
 impl PlatformController for Native {
+    fn furnishings(&self, window: isize, d: Display, visible: bool, anchor: isize) {
+        if visible {
+            self.present(window, d, Mode::Desktop, anchor, true, false, false);
+        } else {
+            unsafe { ShowWindow(window as HWND, SW_HIDE); }
+        }
+    }
+    fn set_ground_input(&self, enabled: bool, walk: bool) {
+        WALK.store(walk, Ordering::Relaxed);
+        if PLAY_CAPTURE.swap(enabled, Ordering::Relaxed) != enabled {
+            unsafe { PostThreadMessageW(self.key_thread, WM_GROUND_MODE, 0, 0); }
+        }
+    }
     fn install(events: Sender<NativeEvent>) -> Result<Self> {
         unsafe {
             EVENTS.set(events).map_err(|_| "桌面控制器重复初始化")?;
@@ -267,19 +502,6 @@ impl PlatformController for Native {
                 return Err("无法建立桌宠交互窗口".into());
             }
             SetLayeredWindowAttributes(w, 0, 1, LWA_ALPHA);
-            let register = |id, key: u8| {
-                for (modifiers, label) in [
-                    (MOD_ALT, "Alt"),
-                    (MOD_CONTROL | MOD_ALT, "Ctrl+Alt"),
-                    (MOD_CONTROL | MOD_SHIFT | MOD_ALT, "Ctrl+Alt+Shift"),
-                ] {
-                    if RegisterHotKey(w, id, modifiers | MOD_NOREPEAT, u32::from(key)) != 0 {
-                        return Some(format!("{label}+{}", char::from(key)));
-                    }
-                }
-                None
-            };
-            let keys = [register(1, b'Q'), register(2, b'W')];
             let hook = SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
                 EVENT_SYSTEM_FOREGROUND,
@@ -294,10 +516,12 @@ impl PlatformController for Native {
             }
             WTSRegisterSessionNotification(w, NOTIFY_FOR_THIS_SESSION);
             SetTimer(w, 1, 60000, None);
+            let (key_thread, keys) = keyboard_listener()?;
             Ok(Self {
                 desktop_foreground: AtomicBool::new(false),
                 hit: w as isize,
                 hook: hook as isize,
+                key_thread,
                 keys,
             })
         }
@@ -367,33 +591,38 @@ impl PlatformController for Native {
             )
         }
     }
-    fn present(
-        &self,
-        stage: isize,
-        d: Display,
-        mode: Mode,
-        wallpaper: bool,
-        visible: bool,
-        interactive: bool,
-        topmost: bool,
-    ) -> bool {
+    fn wallpaper(&self, window: isize, d: Display, visible: bool, above_icons: bool) -> bool {
         unsafe {
-            let w = stage as HWND;
-            let mut style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
-            let requested = mode == Mode::Desktop && wallpaper && !interactive;
+            let w = window as HWND;
+            if !visible { ShowWindow(w, SW_HIDE); return false; }
+            let style = GetWindowLongPtrW(w, GWL_STYLE) as u32 & !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU);
+            SetWindowLongPtrW(w, GWL_STYLE, style as isize);
+            let requested = !above_icons;
             let mut parent = if style & WS_CHILD != 0 {
                 GetParent(w)
             } else {
                 null_mut()
             };
             if requested && parent.is_null() {
+                if GetWindowLongPtrW(w, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0 {
+                    SetWindowPos(
+                        w,
+                        HWND_NOTOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
                 let host = wallpaper_host();
                 if !host.is_null() {
-                    SetLastError(0);
+                    let child_style = (style & !WS_POPUP) | WS_CHILD;
+                    SetWindowLongPtrW(w, GWL_STYLE, child_style as isize);
                     SetParent(w, host);
-                    if GetLastError() == 0 {
+                    if GetParent(w) == host {
                         parent = host;
-                        style = (style & !WS_POPUP) | WS_CHILD;
+                    } else {
                         SetWindowLongPtrW(w, GWL_STYLE, style as isize);
                     }
                 }
@@ -404,32 +633,62 @@ impl PlatformController for Native {
                 SetWindowLongPtrW(w, GWL_STYLE, ((style & !WS_CHILD) | WS_POPUP) as isize);
                 parent = null_mut();
             }
-            let mut ex = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32
-                | WS_EX_TOOLWINDOW
-                | WS_EX_NOACTIVATE
-                | WS_EX_LAYERED;
+            if requested && parent.is_null() {
+                ShowWindow(w, SW_HIDE);
+                return false;
+            }
+            let ex = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32;
+            SetWindowLongPtrW(w, GWL_EXSTYLE, (ex | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as isize);
+            // A layered scenery HWND needs an explicit opacity after reparenting.
+            SetLayeredWindowAttributes(w, 0, 255, LWA_ALPHA);
+            let mut pt = POINT { x: d.screen.x, y: d.screen.y };
+            let (z, flags) = if parent.is_null() { above(w, icon_host()) } else {
+                ScreenToClient(parent, &mut pt);
+                (HWND_TOP, 0)
+            };
+            SetWindowPos(w,z,pt.x,pt.y,d.screen.w,d.screen.h,flags|SWP_SHOWWINDOW|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+            true
+        }
+    }
+    fn present(
+        &self,
+        stage: isize,
+        d: Display,
+        _mode: Mode,
+        desktop_anchor: isize,
+        visible: bool,
+        interactive: bool,
+        topmost: bool,
+    ) {
+        unsafe {
+            let w = stage as HWND;
+            let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
+            SetWindowLongPtrW(w, GWL_STYLE, ((style & !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU)) | WS_POPUP) as isize);
+            let mut ex = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32 | WS_EX_TOOLWINDOW;
             if interactive {
-                ex &= !(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
+                ex &= !(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
             } else {
-                ex |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
+                ex |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
             }
             SetWindowLongPtrW(w, GWL_EXSTYLE, ex as isize);
-            if !visible {
-                ShowWindow(w, SW_HIDE);
-                self.hide_hit();
-                return !parent.is_null();
+            if !interactive {
+                release_stage_focus(w);
             }
-            let mut origin = POINT {
+            if !visible {
+                SetWindowPos(w, HWND_NOTOPMOST, 0, 0, 0, 0,
+                    SWP_HIDEWINDOW | SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                self.hide_hit();
+                return;
+            }
+            let origin = POINT {
                 x: d.screen.x,
                 y: d.screen.y,
             };
-            if !parent.is_null() {
-                ScreenToClient(parent, &mut origin);
-            }
+            if IsIconic(w) != 0 { ShowWindow(w, SW_SHOWNOACTIVATE); }
             let (z, flags) = if topmost {
                 (HWND_TOPMOST, 0)
-            } else if !parent.is_null() {
-                (HWND_BOTTOM, 0)
+            } else if desktop_anchor != 0 {
+                above(w, desktop_anchor as HWND)
             } else {
                 above(w, icon_host())
             };
@@ -443,12 +702,11 @@ impl PlatformController for Native {
                 flags
                     | SWP_FRAMECHANGED
                     | SWP_SHOWWINDOW
-                    | if interactive { 0 } else { SWP_NOACTIVATE },
+                    | if interactive && topmost { 0 } else { SWP_NOACTIVATE },
             );
-            if interactive {
+            if interactive && topmost {
                 SetForegroundWindow(w);
             }
-            !parent.is_null()
         }
     }
     fn hide_hit(&self) {
@@ -548,10 +806,9 @@ impl Drop for Native {
     fn drop(&mut self) {
         unsafe {
             let w = self.hit as HWND;
+            PostThreadMessageW(self.key_thread, WM_QUIT, 0, 0);
             UnhookWinEvent(self.hook as _);
             KillTimer(w, 1);
-            UnregisterHotKey(w, 1);
-            UnregisterHotKey(w, 2);
             WTSUnRegisterSessionNotification(w);
             DestroyWindow(w);
         }
@@ -563,6 +820,83 @@ pub fn awake_seconds() -> u64 {
         QueryUnbiasedInterruptTime(&mut t);
     }
     t / 10_000_000
+}
+// Crop coordinates are fractions of the stage client area, independent of WebView zoom and DPI.
+pub fn capture_desktop(stage: isize, [x, y, width, height]: [f64; 4]) -> Result<Vec<u8>> {
+    if ![x, y, width, height]
+        .iter()
+        .all(|v| (0.0..=1.0).contains(v))
+        || x + width > 1.000001
+        || y + height > 1.000001
+    {
+        return Err("取景范围超出桌面".into());
+    }
+    const SIDE: i32 = 720;
+    unsafe {
+        let mut client = RECT::default();
+        let mut origin = POINT::default();
+        if GetClientRect(stage as HWND, &mut client) == 0
+            || ClientToScreen(stage as HWND, &mut origin) == 0
+        {
+            return Err("无法定位桌面取景框".into());
+        }
+        let px = |n: f64| (n * f64::from(client.right)).round() as i32;
+        let py = |n: f64| (n * f64::from(client.bottom)).round() as i32;
+        let mut info = BITMAPINFO::default();
+        info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = SIDE;
+        info.bmiHeader.biHeight = -SIDE;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        let mut bits = null_mut();
+        let screen = GetDC(null_mut());
+        if screen.is_null() {
+            return Err("无法读取桌面画面".into());
+        }
+        let dc = CreateCompatibleDC(screen);
+        let bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+        let mut result = Err("无法拍下桌面画面".into());
+        if !dc.is_null() && !bitmap.is_null() && !bits.is_null() {
+            let old = SelectObject(dc, bitmap);
+            SetStretchBltMode(dc, HALFTONE);
+            SetBrushOrgEx(dc, 0, 0, null_mut());
+            windows_sys::Win32::Graphics::Dwm::DwmFlush();
+            if !old.is_null()
+                && StretchBlt(
+                    dc,
+                    0,
+                    0,
+                    SIDE,
+                    SIDE,
+                    screen,
+                    origin.x + px(x),
+                    origin.y + py(y),
+                    px(x + width) - px(x),
+                    py(y + height) - py(y),
+                    SRCCOPY | CAPTUREBLT,
+                ) != 0
+            {
+                GdiFlush();
+                let mut pixels =
+                    std::slice::from_raw_parts(bits.cast::<u8>(), (SIDE * SIDE * 4) as usize)
+                        .to_vec();
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                    pixel[3] = 255;
+                }
+                result = Ok(pixels);
+            }
+            SelectObject(dc, old);
+        }
+        if !bitmap.is_null() {
+            DeleteObject(bitmap);
+        }
+        if !dc.is_null() {
+            DeleteDC(dc);
+        }
+        ReleaseDC(null_mut(), screen);
+        result
+    }
 }
 pub fn cursor_pos() -> (i32, i32) {
     let p = cursor();

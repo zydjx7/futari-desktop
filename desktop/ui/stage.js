@@ -1,14 +1,15 @@
+import { furnitureChannel } from "./furniture-channel.js";
 import art from "./vendor/layout.js";
 import actions from "./vendor/action-layout.js";
 import { Puppet, clamp, ease, foreContact, poseCels } from "./vendor/motion.js";
 import { RabbitLife } from "./vendor/movement.js";
 import { createPaper } from "./vendor/scenes/paper.js";
-import { createSnow } from "./vendor/scenes/snow.js";
+import { image, loadScenery } from "./scenery.js";
 import { bowl, tunnelBack, tunnelFront, tunnelPlacement, nightLight } from "./vendor/props.js";
 import { daylight, lightWash, nightFigure, nightPrint } from "./vendor/light.js";
 import {
-  icons as iconMap,
-  paintIcon,
+  icon,
+  loadGoods, paintIcon, furnishingSize, furnitureTask, snackTask, drawFurnishing, petals,
   paintWillow,
   willowShape,
   willowRestAngle,
@@ -16,9 +17,13 @@ import {
 import { configureAlbum } from "./vendor/paper.js";
 import { createCamera } from "./vendor/camera.js";
 import { canvasToBase64, savePolaroidPrint } from "./album-bridge.js";
+import { handleShortcut } from "./shortcuts.js";
 import {
+  desktopSize,
+  nestDestination,
   alphaRuns,
   alphaRunsBox,
+  rabbitPortrait,
   field,
   location,
   inverse,
@@ -33,7 +38,6 @@ if (/Mac/.test(navigator.platform)) document.documentElement.classList.add("appk
 const world = document.querySelector("#world"),
   pet = document.querySelector("#pet"),
   sel = document.querySelector("#selection"),
-  playBar = document.querySelector("#play-bar"),
   cameraHost = document.querySelector("#camera-host"),
   foodGhost = document.querySelector("#food-ghost");
 
@@ -44,18 +48,44 @@ const actor = stamp.getContext("2d"),
   ink = pet.getContext("2d"),
   terrain = world.getContext("2d");
 
-async function image(src) {
-  const im = new Image();
-  im.src = src;
-  await im.decode();
-  return im;
-}
-
 const [atlas, icons, limbs, paperTex] = await Promise.all(
   ["caramel", "stationery", "actions", "paper"].map((n) =>
-    image("./art/" + n + ".webp"),
+    image(new URL("./art/" + n + ".webp", import.meta.url).href),
   ),
 );
+
+await loadGoods().decode();
+
+const publishFurniture = furnitureChannel(message => { if (message === "ready") sendFurniture(); });
+
+function separateFurniture() {
+  return view && view.settings.mode !== "desktop" && !view.camera;
+}
+
+// Transmit small transparent tiles on layout changes. Only the stage owns animation and geometry.
+function sendFurniture() {
+  const tiles = [];
+  if (separateFurniture()) {
+    const ratio = typeof BroadcastChannel === "function" ? Math.min(devicePixelRatio || 1, 2) : 1;
+    for (const o of [...things].sort((a,b) => a.z-b.z)) {
+      if (o.name === "lamp") continue;
+      const padding = o.name === "lantern" ? o.w * .5 : 2;
+      const x = Math.floor(o.x-padding), y = Math.floor(o.y-padding);
+      const width = Math.ceil(o.x+o.w+padding-x), height = Math.ceil(o.y+o.h+padding-y);
+      const tile = document.createElement("canvas");
+      tile.width = Math.ceil(width*ratio);
+      tile.height = Math.ceil(height*ratio);
+      const c = tile.getContext("2d");
+      c.scale(ratio,ratio);
+      c.translate(-x,-y);
+      if (o.name === "tunnel") c.drawImage(wash?.night ? nightPrint(sprites.back) : sprites.back, o.x,o.y,o.w,o.h);
+      if (o.name === "ball") o.shape = willowShape(o.x+o.w/2,o.base,o.w,ballAngle);
+      groundThing(c,o);
+      tiles.push({x,y,width,height,pixels:c.getImageData(0,0,tile.width,tile.height)});
+    }
+  }
+  publishFurniture({tiles});
+}
 
 function propSprite(fn, x, y, w, h, grain) {
   const tile = document.createElement("canvas"),
@@ -136,14 +166,14 @@ let scene = null,
   previous = 0,
   lastHit = 0,
   sending = false,
+  contactPending = false,
+  lastPropPaint = 0,
   lastShape = "",
   food = "hay",
   preferredFood = "hay",
   box = null,
   dragOffset = null,
   dragActive = false,
-  playCarry = null,
-  suppressPlayClick = false,
   things = [],
   layers = [],
   wash = null,
@@ -157,6 +187,7 @@ let scene = null,
   rolling = null,
   lastPush = null,
   bedVisits = 0,
+    furnishingVisits = new Map(),
   hoverAt = -9,
   lastPointer = null,
   above = false,
@@ -238,21 +269,45 @@ function ballTrip() {
   return { key: "go", x, y, after: { key: "nudge", dir } };
 }
 
-life.habitat = () => {
-  if (!scene?.props) return {};
+let satiety = 70;
+let homeRequest = 0;
+let nextSatietyRead = 0;
+async function refreshSatiety() {
+  nextSatietyRead = performance.now() + 300_000;
+  const request = ++homeRequest;
+  try {
+    const home = await invoke("home");
+    if (request === homeRequest) satiety = home.satiety ?? 70;
+  } catch { /* Keep the last room reading while offline. */ }
+}
+
+const isNest = name => ["bed","toastbed","knitbed"].includes(name);
+
+life.habitat = (routes = true) => {
+  if (view?.visible && performance.now() >= nextSatietyRead) refreshSatiety();
+  if (!scene?.props) return { desktop: true, satiety, night: daylight(view?.atmosphere || "auto") === "night" };
   const h = innerHeight || 1;
-  const bed = things.find((o) => o.name === "bed");
-  const [bx, by] = scene.props.bowl;
+  const bed = things.find((o) => isNest(o.name));
+  const mat = things.find(o => o.name === "mat");
+  const quiet = things.find(o => ["teaset", "lamp", "lantern"].includes(o.name));
+  const log = things.find(o => o.name === "tunnel");
+  const wood = things.find(o=>o.name==="applewood");
+  const bowl = things.find(o => o.name === "bowl");
   return {
-    ball: ballTrip(),
-    bed: bed && { key: "go", x: scene.props.bed[0], y: bed.base / h - 0.008 },
-    bowl: {
+    desktop: true, satiety,
+    mat: mat && { key: "go", x: (mat.x + mat.w / 2) / innerWidth, y: (mat.y + mat.h * .72) / h },
+    quietSpot: quiet && { key: "go", x: (quiet.x + quiet.w * .94) / innerWidth, y: quiet.base / h - .012 },
+    tunnel: log && { key: "go", x: (log.x + log.w * .348) / innerWidth, y: log.base / h + .04, after: "tunnel" },
+    applewood: wood && {key:"go",x:(wood.x+wood.w*.5)/innerWidth,y:wood.base/h,after:{key:"sniff",follow:"nibble"}},
+    ball: routes && (ballTrip() || (view.settings.mode === "overlay" && !view.camera ? scene.wander(0, life.x) : null)),
+    bed: view.settings.auto_rest && bed && nestDestination(bed, innerWidth, h),
+    bowl: bowl && {
       key: "go",
-      x: bx + 0.065,
-      y: by - 0.012,
+      x: (bowl.x + bowl.w) / innerWidth,
+      y: bowl.base / h - 0.012,
       after: { key: "sniff", dir: -1 },
     },
-    ownsBed: (view?.placed || []).includes("bed"),
+    ownsBed: Boolean(bed),
     night: currentLight === "night",
   };
 };
@@ -269,21 +324,25 @@ function layout() {
   currentLight = daylight(view.atmosphere || "auto");
   lastLightKey = (view.atmosphere || "auto") + ":" + currentLight;
   const placed = view.placed || [];
-  const unit = Math.min(w, h * 1.45) * (scene.propScale ?? 0.79);
-  for (const [name, [x, z]] of Object.entries(scene.props || {})) {
-    if ((name === "ball" || name === "bed") && !placed.includes(name)) continue;
-    if (name === "lamp" && currentLight !== "night") continue;
+  const propBase = desktopSize(w, h, view.settings.prop_scale);
+  const unit = view.camera ? Math.min(w, h * 1.45) * (scene.propScale ?? 0.79) : propBase * 5;
+  for (const [anchor, [x, z]] of Object.entries(scene.props || {})) {
+    const name = anchor === "bed" ? (placed.find(id=>["toastbed","knitbed"].includes(id)) || "bed")
+        : anchor === "lamp" && placed.includes("lantern") ? "lantern" : anchor;
+      if ((name !== "lamp" || scene.id === "desktop") && !placed.includes(name)) continue;
+    if (name === "lantern" && currentLight === "day") continue;
+      if (name === "lamp" && currentLight !== "night") continue;
     const approachY = z + 0.04;
     let width, left;
     if (name === "tunnel") {
       let entryX = x;
       for (let i = 0; i < 3; i++) {
-        width = (scene.size(w, h, entryX, approachY) * 1.085 * 474) / 258;
+        width = ((view.camera ? scene.size(w, h, entryX, approachY) : propBase) * 1.085 * 474) / 258;
         left = Math.max(0, Math.min(w * x - width / 2, w * 0.986 - width));
         entryX = (left + 0.348 * width) / w;
       }
     } else {
-      width = unit * { bowl: 0.143, bed: 0.255, ball: 0.084, lamp: 0.19 }[name];
+      width = unit * (furnishingSize[name] ?? { bowl: 0.143, bed: 0.255, ball: 0.084, lamp: 0.19 }[name]);
     }
     const tile = sprites[name],
       height = tile ? (width * tile.height) / tile.width : width;
@@ -292,7 +351,7 @@ function layout() {
     if (name === "ball") ballX = clamp(ballX ?? x, ...ballRange(width, z, w, h));
     things.push({
       name,
-      z: name === "bed" ? z - 0.155 : z,
+      z: ["bed","mat","toastbed","knitbed"].includes(name) ? z - 0.155 : z,
       x: left ?? (name === "ball" ? (ballX ?? x) : x) * w - width / 2,
       y: bottom - height,
       w: width,
@@ -307,7 +366,7 @@ function layout() {
     w,
     h,
     currentLight,
-    things.find((o) => o.name === "lamp"),
+    things.find((o) => o.name === "lamp" || o.name === "lantern"),
     scene.id === "snow",
   );
   if (scene.id === "paper") {
@@ -322,6 +381,7 @@ function layout() {
     paperGlow.addColorStop(0, "rgba(226,185,121,.17)");
     paperGlow.addColorStop(1, "rgba(255,248,231,0)");
   }
+  sendFurniture();
 }
 
 function stop() {
@@ -331,7 +391,6 @@ function stop() {
   lastShape = "";
   dragOffset = null;
   dragActive = false;
-  playCarry = null;
   draggingFood = false;
   foodGhost.hidden = true;
   life.held = false;
@@ -349,77 +408,21 @@ function size(canvas, w, h) {
   if (canvas.height !== h) canvas.height = h;
 }
 
-function randomSnow(count) {
-  return Array.from({ length: count }, () => [Math.random(), Math.random()]);
-}
-
-async function loadLayer(id, layer) {
-  const bytes = await invoke("scene_layer", { id, layer });
-  const url = URL.createObjectURL(new Blob([bytes], { type: "image/webp" }));
-  try {
-    return await image(url);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
-function makeClearHabitat(v) {
-  const w = innerWidth || 1280,
-    h = innerHeight || 720;
-  const { wx, wy, ww, wh } = workMetrics(v, w, h);
-  const floor = () => wy + wh * 0.56;
-  return {
-    id: "paper",
-    transparent: true,
-    propScale: 0.79 * Math.min(ww, wh),
-    floor,
-    depth: (_, y) => clamp((y - floor()) / Math.max(0.05, wh * 0.39)),
-    size: (vw, vh, _x, y) => {
-      const t = clamp((wy + wh * 0.74 - y) / Math.max(0.05, wh * 0.16));
-      return (
-        Math.min(wh * vh * 0.34, ww * vw * 0.36) *
-        (1 - 0.32 * t * t * (3 - 2 * t))
-      );
-    },
-    props: {
-      bowl: [wx + 0.13 * ww, wy + 0.89 * wh],
-      tunnel: [wx + 0.85 * ww, wy + 0.66 * wh],
-      bed: [wx + 0.57 * ww, wy + 0.9 * wh],
-      ball: [wx + 0.73 * ww, wy + 0.9 * wh],
-      lamp: [wx + 0.61 * ww, wy + 0.7 * wh],
-    },
-    wander(i, x) {
-      if (i % 6 === 1) return { key: "peek" };
-      if (i % 6 === 3) return { key: "loaf" };
-      if (i % 6 === 5) return { key: "nibble" };
-      const xx =
-        x > wx + ww * 0.5
-          ? wx + ww * (0.18 + Math.random() * 0.22)
-          : wx + ww * (0.6 + Math.random() * 0.22);
-      return {
-        key: "go",
-        x: xx,
-        y: wy + wh * (0.64 + Math.random() * 0.26),
-        gait: "auto",
-        arrival: true,
-      };
-    },
-  };
-}
-
 function makePaperHabitat(v) {
   const w = innerWidth || 1280,
     h = innerHeight || 720;
   const { wx, wy, ww, wh } = workMetrics(v, w, h);
+  const scale = v.camera ? 1 : 0.55;
   const base = createPaper();
   return {
     ...base,
     id: "paper",
-    propScale: Math.min(ww, wh),
+    propScale: scale * Math.min(ww, wh),
     floor: (x) => wy + wh * base.floor(x),
     depth: (x, y) =>
       base.depth(x, clamp((y - wy) / Math.max(0.05, wh), 0, 1)),
     size: (vw, vh, x, y) =>
+      scale *
       base.size(
         ww * vw,
         wh * vh,
@@ -445,104 +448,15 @@ function makePaperHabitat(v) {
 }
 
 async function makeScene(id, v) {
-  if (id === "clear") return makeClearHabitat(v);
+  if (id === "desktop") {
+    const props = makePaperHabitat(v).props;
+    return {
+      ...clearPack(), props, id, transparent: true,
+      floor: () => field(view, innerWidth, innerHeight, devicePixelRatio || 1).size / innerHeight,
+    };
+  }
   if (id === "paper") return makePaperHabitat(v);
-  const packs = await invoke("scene_list");
-  const spec = packs.find((p) => p.id === id);
-  if (!spec) throw Error("场景包不在目录中");
-  if (spec.layout === "snow-forest")
-    return createSnow((name) =>
-      loadLayer(id, name === "snow-field" ? "bg" : "fg"),
-    );
-  const [bg, fg] = await Promise.all([
-    loadLayer(id, "bg"),
-    loadLayer(id, "fg"),
-  ]);
-  const points = randomSnow(spec.weather === "snow" ? 28 : 0),
-    base = clearPack(false);
-  const fgMask = document.createElement("canvas");
-  fgMask.width = 192;
-  fgMask.height = 120;
-  const c = fgMask.getContext("2d", { willReadFrequently: true });
-  c.drawImage(fg, 0, 0, 192, 120);
-  const alpha = c.getImageData(0, 0, 192, 120).data;
-  let dims = [1, 1];
-  const g0 = spec.horizon + (1 - spec.horizon) * 0.25;
-  const g1 = Math.min(0.91, spec.horizon + (1 - spec.horizon) * 0.78);
-  return {
-    ...base,
-    id: "custom",
-    propScale: 0.76,
-    floor: () => spec.horizon,
-    depth: (_, y) =>
-      Math.max(0, (y - spec.horizon) / Math.max(0.05, 1 - spec.horizon)),
-    size: (w, h, x, y) =>
-      Math.min(
-        w * 0.25,
-        h *
-          (0.1 +
-            (0.22 * Math.max(0, y - spec.horizon)) /
-              Math.max(0.05, 1 - spec.horizon)),
-      ),
-    props: {
-      bowl: [0.14, g1],
-      tunnel: [0.84, g0],
-      bed: [0.56, g1],
-      ball: [0.72, g1],
-      lamp: [0.6, (g0 + g1) * 0.5],
-    },
-    wander(i, x) {
-      const next = base.wander(i, x);
-      return next.x == null
-        ? next
-        : {
-            ...next,
-            y: clamp(next.y, spec.horizon + 0.04, 0.92),
-          };
-    },
-    resize: (w, h) => {
-      dims = [w, h];
-    },
-    background: (ctx, w, h) => ctx.drawImage(bg, 0, 0, w, h),
-    landmarks: () => [{ name: "fg", z: spec.foregroundDepth }],
-    paintLandmark: (ctx) => ctx.drawImage(fg, 0, 0, ...dims),
-    occludes: (x, y, z) => {
-      if (
-        z >= spec.foregroundDepth ||
-        x < 0 ||
-        y < 0 ||
-        x >= dims[0] ||
-        y >= dims[1]
-      )
-        return false;
-      return (
-        alpha[
-          4 *
-            (Math.floor((y / dims[1]) * 120) * 192 +
-              Math.floor((x / dims[0]) * 192)) +
-            3
-        ] > 100
-      );
-    },
-    after(ctx, w, h, t) {
-      ctx.fillStyle = "#fffc";
-      for (const [x, y] of points) {
-        ctx.beginPath();
-        ctx.arc(
-          ((x + t * 0.005) % 1) * w,
-          ((y + t * 0.035) % 1) * h,
-          1.2,
-          0,
-          Math.PI * 2,
-        );
-        ctx.fill();
-      }
-    },
-    dispose() {
-      bg.removeAttribute("src");
-      fg.removeAttribute("src");
-    },
-  };
+  return loadScenery(id);
 }
 
 function advanceBall(p, w, h) {
@@ -586,8 +500,12 @@ function advanceBall(p, w, h) {
 }
 
 function groundThing(c, o) {
+    if (Object.hasOwn(furnishingSize,o.name)) return drawFurnishing(c,icons,o,life.clock,currentLight);
   if (!scene?.props?.[o.name]) {
+    c.save();
+    if (view.settings.wallpaper && !view.camera && view.wallActive) c.globalCompositeOperation = "destination-out";
     scene.paintLandmark(c, o);
+    c.restore();
     return;
   }
   const night = Boolean(wash?.night);
@@ -666,8 +584,8 @@ function hitsRabbit(x, y) {
       Math.abs(x - f.cx) < f.size * 0.9 &&
       y > f.base - 1.25 * f.size &&
       y < f.base + 0.07 * f.size &&
-      !scene?.occludes?.(x, y, f.z) &&
-      !things.some((o) => o.z > f.z && hidesPixel(x, y, o)) &&
+      ((separateFurniture() && !view.atFurniture) || (!scene?.occludes?.(x, y, f.z) &&
+        !things.some((o) => o.z > f.z && hidesPixel(x, y, o)))) &&
       puppet.contains(x, y, f),
   );
 }
@@ -685,6 +603,7 @@ function target(x, y) {
 
 function occupied() {
   const next = life.pending;
+    if ([life.follow, next?.follow, life.trip?.after?.key, life.trip?.after?.follow, next?.after?.key, next?.after?.follow].includes("eat")) return true;
   return [
     life.state.kind,
     life.state.next,
@@ -696,28 +615,41 @@ function occupied() {
 
 function act(key, item, atBowl = false) {
   if (!figure || occupied()) return false;
-  if (key === "pet" && (life.state.kind === "pet" || life.pending?.key === "pet"))
-    return false;
-  if ((key === "tunnel" || key === "bed") && scene?.props) {
-    if (key === "bed" && !(view?.placed || []).includes("bed")) return false;
-    const [x, y] = scene.props[key];
-    const log = things.find((o) => o.name === "tunnel");
-    life.go(
-      key === "tunnel" && log ? (log.x + log.w * 0.348) / innerWidth : x,
-      key === "tunnel" ? y + 0.04 : y - 0.008,
-      key === "tunnel" ? "tunnel" : ["sploot", "flop", "loaf"][bedVisits++ % 3],
-    );
+  if (key === "eat") refreshSatiety();
+  if (isNest(key)) {
+    const nest = things.find(o => o.name === key);
+    if (!nest) return false;
+    const dest = nestDestination(nest, innerWidth, innerHeight);
+    const visit = bedVisits++;
+    const rest = key === "bed" ? ["sploot","flop","loaf"][visit % 3] : furnitureTask(key,visit);
+    life.go(dest.x, dest.y, rest);
+    play();
+    return true;
+  }
+  if (Object.hasOwn(furnishingSize,key)) {
+      const obj=things.find(o=>o.name===key);
+      if(!obj)return false;
+      obj.touched=life.clock;
+      const visit=furnishingVisits.get(key) || 0;
+      furnishingVisits.set(key,visit+1);
+      life.go((obj.x+obj.w*(key==="teaset" ? .94 : .5))/innerWidth,obj.base/innerHeight-.012,furnitureTask(key,visit));
+      play();return true;
+    }
+  if (key === "tunnel") {
+    const log = things.find(o => o.name === "tunnel");
+    if (!log) return false;
+    life.go((log.x + log.w * .348) / innerWidth, log.base / innerHeight + .04, "tunnel");
   } else if (key === "ball" || key === "nudge") {
     const trip = ballTrip();
     if (!trip) return false;
     life.issue(trip);
-  } else if (key === "eat" && atBowl && scene?.props?.bowl) {
+  } else if (key === "eat" && atBowl && things.some(o => o.name === "bowl")) {
     food = item || preferredFood;
     const [x, y] = scene.props.bowl;
-    life.go(x + 0.052, y - 0.026, "eat");
+    life.go(x + 0.052, y - 0.026, snackTask(item));
   } else {
     if (key === "eat") food = item || preferredFood;
-    life.issue({ key });
+    life.issue(key === "eat" ? snackTask(item) : { key });
   }
   play();
   return true;
@@ -781,11 +713,11 @@ function handlePick(pick, x, y) {
     }
     return;
   }
-  if (pick === "bowl") {
+  if (pick === "bowl" && things.some(o => o.name === "bowl")) {
     handleBowlClick();
     return;
   }
-  if (pick === "tunnel" || pick === "ball" || pick === "bed") {
+  if (Object.hasOwn(furnishingSize,pick) || pick === "tunnel" || pick === "ball" || pick === "bed") {
     act(pick);
     return;
   }
@@ -999,6 +931,15 @@ function observeMoment(moment) {
 
 const cameraSceneProxy = {
   copyFrame,
+  get desktopCamera() { return view?.desktopCamera; },
+  portrait() {
+    if (!figure) return null;
+    const extent = Math.ceil(figure.size * 1.7);
+    return rabbitPortrait(actor.getImageData(0, 0, stamp.width, stamp.height).data,
+      stamp.width, stamp.height, Math.round(figure.cx - extent / 2),
+      Math.round(figure.ground - extent * 0.81), extent,
+      figure.face.view === "side" ? figure.face.dir : 0);
+  },
   subject() {
     if (!figure) return { x: 0.5, y: 0.55 };
     const w = innerWidth || 1,
@@ -1019,23 +960,38 @@ const cameraSceneProxy = {
       y: (base - side * (0.47 + 0.11 * high - 0.23 * low - 0.08 * p.noseDown)) / h,
     };
   },
-  capture(cropBox) {
+  async capture(cropBox) {
     if (!figure || draggingFood || !innerWidth || !innerHeight || !cropBox?.side)
       return null;
     const photo = document.createElement("canvas");
     photo.width = photo.height = 720;
-    copyFrame(photo, cropBox);
     const now = new Date();
-    return {
+    const shot = {
       photo,
       id: crypto.randomUUID(),
       captured: +now,
       offset: -now.getTimezoneOffset(),
-      scene: currentSceneId === "snow-forest" ? "snow" : "paper",
+      scene: view.desktopCamera ? "desktop" : currentSceneId === "snow-forest" ? "snow" : "paper",
       light: currentLight,
       pose: poseIn(cropBox),
       title: "",
     };
+    if (view.desktopCamera) {
+      const crop = [cropBox.x / innerWidth, cropBox.y / innerHeight,
+        cropBox.side / innerWidth, cropBox.side / innerHeight];
+      // Present a frame containing the rabbit and desktop, without finder chrome.
+      cameraHost.style.opacity = "0";
+      try {
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const bytes = await invoke("capture_desktop", { crop });
+        photo.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(bytes), 720, 720), 0, 0);
+      } finally {
+        cameraHost.style.opacity = "";
+      }
+    } else {
+      copyFrame(photo, cropBox);
+    }
+    return shot;
   },
 };
 
@@ -1061,27 +1017,27 @@ const camera = createCamera(
 async function apply(v) {
   const prev = view;
   view = v;
+  if (!prev || prev.settings.cloud !== v.settings.cloud || (!prev.visible && v.visible)) refreshSatiety();
   if (v.name) camera.setName(v.name);
   sel.hidden = !v.selecting;
-  playBar.hidden = !(v.visible && v.playMode && !v.selecting && !v.camera);
   cameraHost.hidden = !(v.visible && v.camera);
   if (!v.camera && camera.isOpen()) camera.close();
   if (!v.visible || v.selecting) stop();
 
-  const fullHabitat = v.settings.mode === "desktop" || v.camera;
-  const targetScene = !fullHabitat
-    ? "overlay"
-    : v.camera && v.settings.scene === "clear"
-      ? "paper"
-      : v.settings.scene;
+  cameraHost.classList.toggle("desktop-camera", v.desktopCamera);
+  const fullHabitat = !v.desktopCamera && (v.camera || (v.wallActive && (v.settings.mode === "desktop" || v.placed.length > 0)));
+  const desktopProps = !v.desktopCamera && !fullHabitat && v.placed.length > 0;
+  let targetScene = desktopProps ? "desktop" : "overlay";
+  if (fullHabitat) {
+    targetScene = v.settings.scene === "clear" ? (v.camera ? "paper" : "snow-forest") : v.settings.scene;
+  }
   const key =
-    targetScene +
-    ":" +
+    targetScene + (v.camera ? ":camera:" : ":pet:") +
     v.revision +
     ":" +
     v.settings.mode +
     ":" +
-    v.settings.patrol +
+    v.settings.patrol + (v.playMode && targetScene === "overlay" ? ":walk" : "") +
     ":" +
     v.display.work.w +
     "x" +
@@ -1097,14 +1053,22 @@ async function apply(v) {
     world.hidden = true;
     size(world, 1, 1);
 
-    if (!fullHabitat) {
+    if (!fullHabitat && !desktopProps) {
       currentSceneId = "overlay";
+      sendFurniture();
+      const oldPosition = prev && box && prev.settings.mode === v.settings.mode && prev.playMode !== v.playMode
+        ? location(box, life.x, life.y) : null;
       life.setPack(
         clearPack(
-          v.settings.mode === "overlay" && v.settings.patrol === "taskbar",
+          !v.playMode && v.settings.mode === "overlay" && v.settings.patrol === "taskbar", v.playMode,
         ),
       );
-    } else if (!v.visible) {
+      if (oldPosition) {
+        const next = inverse(field(v, innerWidth, innerHeight, devicePixelRatio || 1), oldPosition.x, oldPosition.ground);
+        life.x = next.x;
+        life.y = next.y;
+      }
+    } else if (!v.visible && !v.placed.length) {
       currentKey = "pending";
     } else {
       sceneLoading = (async () => {
@@ -1113,6 +1077,19 @@ async function apply(v) {
           if (version !== generation) {
             next.dispose?.();
             return;
+          }
+          if (!v.camera) {
+            next.size = (w, h) => field(view, w, h, devicePixelRatio || 1).size;
+          }
+          if (!v.camera && v.settings.mode === "overlay") {
+            next.floor = () => desktopSize(innerWidth,innerHeight,view.settings.rabbit_scale) / innerHeight;
+            next.wander = (i,x) => {
+              const task = clearPack().wander(i,x);
+              if (task.x == null) return task;
+              const patrol = field(view,innerWidth,innerHeight,devicePixelRatio || 1);
+              const pos = location(patrol,task.x,task.y);
+              return {...task, x:pos.x/innerWidth, y:pos.ground/innerHeight};
+            };
           }
           scene = next;
           currentSceneId = targetScene;
@@ -1131,7 +1108,7 @@ async function apply(v) {
     }
   } else if (
     scene &&
-    (prev?.atmosphere !== v.atmosphere ||
+    (prev?.atmosphere !== v.atmosphere || prev?.settings.prop_scale !== v.settings.prop_scale ||
       JSON.stringify(prev?.placed) !== JSON.stringify(v.placed))
   ) {
     layout();
@@ -1149,10 +1126,9 @@ function tick(t) {
   const wait = life.state.kind === "idle" ? 65 : 32;
   if (!previous || t - previous >= wait) {
     if (
-      (view.playMode || draggingFood) &&
       above &&
       life.clock - aboveAt >= 0.22 &&
-      ["idle", "listen", "tilt", "sniff", "groom", "loaf"].includes(
+      ["idle", "listen", "tilt", "sniff", "groom"].includes(
         life.state.kind,
       ) &&
       !life.pending &&
@@ -1204,7 +1180,24 @@ function draw(t) {
       : location(box, 1, life.y).x - location(box, 0, life.y).x;
     p.brace = (Math.abs(p.foreSlip) * span * 220) / side;
   }
-  if (scene) advanceBall(p, w, h);
+  if (scene) {
+    const wasRolling = Boolean(rolling);
+    advanceBall(p, w, h);
+    if (separateFurniture() && (rolling || wasRolling || things.some(o => life.clock - (o.touched ?? -10) < 2)) &&
+        (t - lastPropPaint > 100 || (wasRolling && !rolling))) {
+      sendFurniture();
+      lastPropPaint = t;
+    }
+  }
+  if (view.settings.mode === "overlay" && !view.camera && !view.selecting && !contactPending) {
+    const touching = things.some(o => (isNest(o.name) || (o.name === "tunnel" && p.inside > 0)) &&
+      Math.abs(x - o.x - o.w / 2) < o.w / 2 + side * .12 &&
+      ground >= o.y + o.h * .24 && ground <= o.y + o.h + side * .12);
+    if (touching !== view.atFurniture) {
+      contactPending = true;
+      invoke("furniture_contact",{touching}).catch(() => {}).finally(() => { contactPending = false; });
+    }
+  }
 
   const base = ground - side * p.height;
   const tip = puppet.landmark("nose", life.face, p);
@@ -1264,14 +1257,16 @@ function draw(t) {
     puppet.draw(actor, localX, localY, side, life.face, p, p.turn);
   }
 
-  const c = scene ? terrain : ink;
-  if (scene) {
+  const composed = scene && !separateFurniture();
+  const c = composed ? terrain : ink;
+  world.hidden = !composed;
+  if (composed) {
     size(world, w * sr, h * sr);
     world.style.width = w + "px";
     world.style.height = h + "px";
     terrain.setTransform(world.width / w, 0, 0, world.height / h, 0, 0);
     terrain.clearRect(0, 0, w, h);
-    if (!scene.transparent) {
+    if (!scene.transparent && (view.camera || !view.wallActive)) {
       if (scene.background) scene.background(terrain, w, h, life.clock);
       else {
         terrain.fillStyle = paperPattern;
@@ -1327,6 +1322,7 @@ function draw(t) {
     );
     c.restore();
   }
+  if(food==="dandelion" && life.state.kind==="eat") petals(c,mx,my,side,life.state.age);
   if (["eat", "nibble"].includes(life.state.kind)) {
     paintIcon(
       c,
@@ -1337,12 +1333,17 @@ function draw(t) {
       side * 0.17 * Math.max(0.18, 1 - life.state.age / 2.8),
     );
   }
-  if (scene) {
+  if (composed) {
     for (const o of layers) if (o.z > z) groundThing(terrain, o);
-    scene.after?.(terrain, w, h, life.clock);
-    if (!scene.transparent && !wash?.night) wash?.paint();
+    if (view.camera || !view.wallActive) scene.after?.(terrain, w, h, life.clock);
+    if (!scene.transparent && !wash?.night) {
+      terrain.save();
+      if (!view.camera && view.wallActive) terrain.globalCompositeOperation = "source-atop";
+      wash?.paint();
+      terrain.restore();
+    }
     else if (scene.transparent && wash?.night) {
-      const lamp = things.find((o) => o.name === "lamp");
+      const lamp = things.find((o) => o.name === "lamp" || o.name === "lantern");
       if (lamp) {
         terrain.save();
         const lx = lamp.x + lamp.w * 0.5,
@@ -1358,6 +1359,12 @@ function draw(t) {
       }
     }
   }
+  if (separateFurniture() && view.atFurniture && scene) {
+    ink.save();
+    ink.globalCompositeOperation = "destination-out";
+    for (const o of things) if (o.z > z) groundThing(ink,o);
+    ink.restore();
+  }
   if (draggingFood && life.face.view !== "back") {
     c.save();
     c.strokeStyle = "#ad7853";
@@ -1372,7 +1379,6 @@ function draw(t) {
   if (view.camera && camera.isOpen()) camera.update();
 
   if (
-    !view.playMode &&
     !view.camera &&
     !view.selecting &&
     !sending &&
@@ -1380,7 +1386,7 @@ function draw(t) {
   ) {
     lastHit = t;
     let hit;
-    if (!scene) {
+    if (!composed) {
       const n = Math.max(48, Math.min(184, Math.round(extent * ratio)));
       size(mask, n, n);
       hitCtx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1392,7 +1398,7 @@ function draw(t) {
         extent,
         extent,
         ratio,
-        null,
+        view.atFurniture ? (u,v) => things.some(o => o.z > z && hidesPixel(ox+u*extent,oy+v*extent,o)) : null,
       );
       hit = { x: Math.round(ox * ratio), y: Math.round(oy * ratio), ...region };
     } else {
@@ -1436,8 +1442,8 @@ function draw(t) {
       if (log) hitCtx.drawImage(sprites.back, log.x, log.y, log.w, log.h);
       for (const o of interactiveProps) {
         if (o.name === "ball") paintWillow(hitCtx, icons, o.shape);
-        else if (o.name === "bed")
-          paintIcon(hitCtx, icons, "bed", o.x + o.w / 2, o.y + o.h / 2, o.w);
+        else if (o.name === "bed" || Object.hasOwn(furnishingSize,o.name))
+          paintIcon(hitCtx, icons, o.name, o.x + o.w / 2, o.y + o.h / 2, o.w);
         else {
           const tile = sprites[o.name];
           if (tile) hitCtx.drawImage(tile, o.x, o.y, o.w, o.h);
@@ -1475,21 +1481,57 @@ window.addEventListener("resize", () => {
 
 await listen("desktop-view", (e) => apply(e.payload));
 
+function handleHover(x, y, now) {
+  if (!figure || reduced.matches || occupied()) return;
+  const prev = lastPointer;
+  const speed = prev
+    ? Math.hypot(x - prev.x, y - prev.y) / Math.max(8, now - prev.now)
+    : 0;
+  if (
+    prev &&
+    now - prev.now < 150 &&
+    speed > 0.9 &&
+    Math.hypot(x - figure.cx, y - (figure.base - figure.size * 0.63)) <
+      figure.size * 0.77 &&
+    life.state.kind === "idle" &&
+    life.clock - hoverAt > 2
+  ) {
+    hoverAt = life.clock;
+    above = false;
+    act("alert");
+  } else {
+    watchAbove(x, y);
+  }
+  lastPointer = { x, y, now };
+}
+
 await listen("gesture", ({ payload: key }) => {
   if (key === "drop") {
-    life.held = false;
+    if (dragActive && dragOffset) life.dropped();
     dragOffset = null;
     dragActive = false;
-    life.wait = 3;
+  } else if (["tunnel", "ball", "bed", "bowl"].includes(key)) {
+    if (key === "bed") {
+      const nest = things.find(o => isNest(o.name));
+      if (nest) act(nest.name);
+    } else handlePick(key);
   } else {
-    const eat = key === "carrot" || key === "hay";
+    const eat = key.startsWith("feed:");
     if (eat) {
-      food = key;
-      preferredFood = key;
+      refreshSatiety();
+      food = preferredFood = key.slice(5);
     }
-    life.issue({ key: eat ? "eat" : key });
+    life.issue(eat ? snackTask(food) : {key});
   }
   play();
+});
+
+await listen("desktop-ground", ({ payload: [px, py] }) => {
+  if (!view?.visible || view.camera || view.selecting) return;
+  const x = px / devicePixelRatio, y = py / devicePixelRatio;
+  const prop = separateFurniture() && [...things].reverse().find(o => propAt(x,y,o));
+  if (prop) handlePick(prop.name,x,y);
+  else if (view.playMode) handlePick(null,x,y);
 });
 
 await listen("stage-click", ({ payload: [px, py] }) => {
@@ -1498,6 +1540,12 @@ await listen("stage-click", ({ payload: [px, py] }) => {
     cy = py / ratio;
   const pick = target(cx, cy);
   if (pick) handlePick(pick, cx, cy);
+});
+
+await listen("stage-hover", ({ payload: [px, py] }) => {
+  if (view?.playMode || view?.selecting || view?.camera) return;
+  const ratio = devicePixelRatio || 1;
+  handleHover(px / ratio, py / ratio, performance.now());
 });
 
 await listen("drag-start", ({ payload: [px, py] }) => {
@@ -1548,9 +1596,9 @@ await listen("food-drag", async ({ payload }) => {
       life.held = true;
       life.issue({ key: "front" });
     }
-    const cell = iconMap[payload.item];
-    foodGhost.style.backgroundPosition =
-      (cell % 3) * 50 + "% " + Math.floor(cell / 3) * 50 + "%";
+    const sprite=icon(payload.item);
+    foodGhost.className=sprite.className;
+    foodGhost.style.backgroundPosition=sprite.style.backgroundPosition;
     foodGhost.style.left = cx + "px";
     foodGhost.style.top = cy + "px";
     foodGhost.hidden = false;
@@ -1595,127 +1643,6 @@ await listen("camera-open", async ({ payload }) => {
   if (payload?.moment) observeMoment(payload.moment);
   camera.start(true);
   play();
-});
-
-// Interactive play mode handlers (only active when view.playMode is true)
-document.querySelector("#exit-play").onclick = () =>
-  invoke("exit_stage_mode", { mode: "play" }).catch(() => {});
-
-document.addEventListener("pointerdown", (e) => {
-  if (!view?.playMode || view.selecting || view.camera) return;
-  if (playBar.contains(e.target) || !e.isPrimary || e.button !== 0) return;
-  if (!hitsRabbit(e.clientX, e.clientY) || occupied()) return;
-  const at = scene
-    ? { x: life.x * innerWidth, ground: life.y * innerHeight }
-    : location(box, life.x, life.y);
-  playCarry = {
-    id: e.pointerId,
-    startX: e.clientX,
-    startY: e.clientY,
-    dx: at.x - e.clientX,
-    dy: at.ground - e.clientY,
-    active: false,
-  };
-});
-
-window.addEventListener("pointermove", (e) => {
-  if (playCarry && e.pointerId === playCarry.id) {
-    if (!playCarry.active) {
-      if (
-        Math.hypot(e.clientX - playCarry.startX, e.clientY - playCarry.startY) <= 6
-      )
-        return;
-      playCarry.active = true;
-      suppressPlayClick = true;
-      above = false;
-      life.stay();
-      life.held = true;
-    }
-    const nx = e.clientX + playCarry.dx,
-      ny = e.clientY + playCarry.dy;
-    const pt = scene
-      ? {
-          x: clamp(nx / innerWidth, 0.05, 0.95),
-          y: clamp(ny / innerHeight, scene.floor(nx / innerWidth), 0.95),
-        }
-      : inverse(box, nx, ny);
-    life.x = pt.x;
-    life.y = pt.y;
-    play();
-    return;
-  }
-  if (
-    !view?.playMode ||
-    view.selecting ||
-    view.camera ||
-    e.pointerType !== "mouse" ||
-    !figure
-  )
-    return;
-  const x = e.clientX,
-    y = e.clientY;
-  document.body.style.cursor = target(x, y) ? "pointer" : "default";
-  if (!reduced.matches && !e.buttons && !occupied()) {
-    const prev = lastPointer,
-      now = e.timeStamp;
-    const speed = prev
-      ? Math.hypot(x - prev.x, y - prev.y) / Math.max(8, now - prev.now)
-      : 0;
-    if (
-      prev &&
-      now - prev.now < 150 &&
-      speed > 0.9 &&
-      Math.hypot(x - figure.cx, y - (figure.base - figure.size * 0.63)) <
-        figure.size * 0.77 &&
-      life.state.kind === "idle" &&
-      life.clock - hoverAt > 2
-    ) {
-      hoverAt = life.clock;
-      above = false;
-      act("alert");
-    } else watchAbove(x, y);
-    lastPointer = { x, y, now };
-  }
-});
-
-function endPlayCarry(e) {
-  if (!playCarry || e.pointerId !== playCarry.id) return;
-  const active = playCarry.active;
-  playCarry = null;
-  if (!active) return;
-  life.held = false;
-  life.wait = 3;
-  play();
-  requestAnimationFrame(() => {
-    suppressPlayClick = false;
-  });
-}
-window.addEventListener("pointerup", endPlayCarry);
-window.addEventListener("pointercancel", endPlayCarry);
-
-document.addEventListener("click", (e) => {
-  if (!view?.playMode || view.selecting || view.camera) return;
-  if (playBar.contains(e.target)) return;
-  if (suppressPlayClick) {
-    suppressPlayClick = false;
-    return;
-  }
-  if (e.detail > 1) return;
-  handlePick(target(e.clientX, e.clientY), e.clientX, e.clientY);
-});
-
-document.addEventListener("dblclick", (e) => {
-  if (!view?.playMode || view.selecting || view.camera) return;
-  if (playBar.contains(e.target)) return;
-  if (target(e.clientX, e.clientY))
-    invoke("open_card", { tab: null, notice: null }).catch(() => {});
-});
-
-document.addEventListener("contextmenu", (e) => {
-  e.preventDefault();
-  if (view?.playMode && !view.selecting && !view.camera) {
-    invoke("open_card", { tab: null, notice: null }).catch(() => {});
-  }
 });
 
 // Selection fence handlers
@@ -1768,6 +1695,7 @@ sel.onpointerup = (e) => {
 sel.onpointercancel = () => finish(null);
 
 document.addEventListener("keydown", (e) => {
+  if (handleShortcut(e, invoke, view?.shortcuts)) return;
   if (e.key === "Escape") {
     if (!sel.hidden) {
       finish(null);

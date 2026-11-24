@@ -4,9 +4,13 @@ import catalog from "./vendor/catalog.js";
 import { configureAlbum } from "./vendor/paper.js";
 import { mountAlbum } from "./vendor/book.js";
 import { savePolaroidPrint } from "./album-bridge.js";
+import { handleShortcut } from "./shortcuts.js";
 
 const { invoke } = window.__TAURI__.core,
   { listen } = window.__TAURI__.event;
+
+const isMac = /Mac/.test(navigator.platform);
+const systemMenu = isMac ? "菜单栏的兔子菜单" : "托盘";
 
 configureAlbum({
   async api(path, _signal, body) {
@@ -164,6 +168,37 @@ function row(actions, cls = "ops") {
   return line;
 }
 
+function wallpaperControls() {
+  const s = view.settings;
+  return [
+    header("场景壁纸" + (view.shortcuts[1] ? "　" + view.shortcuts[1] : "")),
+    row([["wall", s.wallpaper ? "关闭壁纸" : "开启壁纸", s.wallpaper ? "off" : "on", s.wallpaper]]),
+    el("small", s.wallpaper && !view.wallActive ? "壁纸暂未显示，可重新开启。" :
+      s.wallpaper_above_icons ? "壁纸开启后显示在桌面图标上方。" : "壁纸开启后显示在桌面图标下方。"),
+  ];
+}
+
+function sizeControl(title, kind, saved) {
+  const label = el("label", title + " ");
+  const output = el("output", saved + "%");
+  const slider = el("input");
+  slider.type = "range";
+  slider.id = kind;
+  slider.min = 50;
+  slider.max = 200;
+  slider.step = 5;
+  slider.value = saved;
+  slider.setAttribute("aria-label", title);
+  slider.oninput = () => { output.textContent = slider.value + "%"; };
+  slider.onchange = () => opt(kind, slider.valueAsNumber).catch(error => {
+    slider.value = saved;
+    output.textContent = saved + "%";
+    msg(error);
+  });
+  label.append(output, slider);
+  return label;
+}
+
 function header(label) {
   return el("h3", label);
 }
@@ -181,6 +216,8 @@ function updateView(v) {
   showName(v.name);
 }
 
+let updateState=await invoke("update_status");
+await listen("update-ready",async()=>{updateState=await invoke("update_status");paint();});
 function paint() {
   nav.replaceChildren();
   for (const [key, [label, sprite]] of Object.entries(tabs)) {
@@ -220,10 +257,37 @@ function paint() {
         more,
         busy: busy || cloudProblem,
         scene: true,
+        desktop: true,
       }),
     );
     if (cloudProblem)
       page.prepend(el("small", "上次同步的内容 · 恢复网络后会自动更新"));
+    if (tab === "bag" && !detail) {
+      const poses = [
+        ["gesture", "摸头", "pet"],
+        ["gesture", "站立张望", "stand"],
+        ["gesture", "警觉竖耳", "alert"],
+        ["gesture", "洗脸理毛", "groom"],
+        ["gesture", "歪头", "tilt"],
+        ["gesture", "嗅探", "sniff"],
+        ["gesture", "侧耳听", "listen"],
+        ["gesture", "回头偷看", "peek"],
+        ["gesture", "背身", "back"],
+        ["gesture", "揣手蹲", "loaf"],
+        ["gesture", "趴卧", "sploot"],
+        ["gesture", "翻肚皮", "flop"],
+        ["gesture", "伸懒腰", "stretch"],
+      ];
+      if (s.mode !== "hidden") {
+        if (view.placed.includes("tunnel")) poses.push(["gesture", "钻木桶", "tunnel"]);
+        if ((view.placed || []).includes("ball"))
+          poses.push(["gesture", "拱柳枝球", "ball"]);
+        if (view.placed.some(id => ["bed","toastbed","knitbed"].includes(id)))
+          poses.push(["gesture", "上小床", "bed"]);
+        if (view.placed.includes("bowl")) poses.push(["gesture", "去食盆", "bowl"]);
+      }
+      page.append(header("小兔动作"), row(poses));
+    }
     return;
   }
   if (tab === "album") {
@@ -258,7 +322,7 @@ function paint() {
           : icon("snow"),
         el("strong", sc.title),
       );
-      b.setAttribute("aria-pressed", String(s.scene === sc.id));
+      b.setAttribute("aria-pressed", String((s.wallpaper ? s.scene : "clear") === sc.id));
       page.append(b);
     }
     page.append(
@@ -276,33 +340,36 @@ function paint() {
         ]),
         "ops light-grid",
       ),
-      header("桌面壁纸"),
-      row([
-        ["wall", "桌面图标之上", "normal", !s.wallpaper],
-        ["wall", "图标下方 · 实验", "worker", s.wallpaper],
-      ]),
+      ...wallpaperControls(),
     );
-    if (s.wallpaper && s.mode === "desktop" && view.visible && !view.wallActive)
-      page.append(el("p", "此桌面使用图标上方模式。"));
-    if (s.mode === "overlay")
-      page.append(row([["mode", "到桌面看风景与道具", "desktop"]]));
     return;
   }
   page.replaceChildren(
-    header("显示层级"),
+    header("小兔状态" + (view.shortcuts[0] ? "　" + view.shortcuts[0] + " 依次切换" : "")),
     row([
-      ["mode", "只在桌面", "desktop", s.mode === "desktop"],
-      ["mode", "置顶陪工", "overlay", s.mode === "overlay"],
-      ["mode", "隐身", "hidden"],
+      ["layer", "隐身", "hidden", s.mode === "hidden"],
+      ["layer", "仅在桌面", "desktop", s.mode === "desktop"],
+      ["layer", "悬浮置顶", "overlay", s.mode === "overlay"],
     ]),
-    header("互动方式"),
+    el("small", "仅在桌面时，回到桌面就能找到兔子。悬浮置顶时，它也会出现在应用窗口上方。"),
+    header("独立开关"),
     row([
-      ["play", "穿透办公（默认）", "off", !view.playMode],
-      ["play", "逗兔互动（可点空地）", "on", view.playMode],
+      ["aboveIcons", "壁纸在图标上方", s.wallpaper_above_icons ? "off" : "on", s.wallpaper_above_icons],
+      ["play", view.playMode ? "关闭点地移动" : "开启点地移动", view.playMode ? "off" : "on", view.playMode],
     ]),
+    el(
+      "small",
+      `开启后，单击桌面空地就能叫兔子过去。也可以从${systemMenu}关闭。`,
+    ),
+    ...wallpaperControls(),
+    header("桌面大小"),
+    sizeControl("兔子", "rabbitScale", s.rabbit_scale),
+    sizeControl("道具", "propScale", s.prop_scale),
+    header("兔窝"),
+    row([["autoRest", "偶尔回窝休息", s.auto_rest ? "off" : "on", s.auto_rest]]),
     header("陪工活动区"),
     row([
-      ["patrol", /Mac/.test(navigator.platform) ? "程序坞上方" : "任务栏上方", "taskbar", s.patrol === "taskbar"],
+      ["patrol", isMac ? "程序坞上方" : "任务栏上方", "taskbar", s.patrol === "taskbar"],
       ["patrol", "角落小窝", "corner", s.patrol === "corner"],
       ["select", "划定活动区", null, s.patrol === "custom"],
       ["patrol", "全屏漫步", "full", s.patrol === "full"],
@@ -328,6 +395,9 @@ function paint() {
           : "已连接她的云端兔窝，与网页版共享。",
       ),
     );
+  page.append(el("small","桌宠 "+updateState.app+" · 资源 "+(updateState.active || "内置")));
+  if(s.cloud) page.append(button("check-update","检查更新"));
+  if(updateState.pending) page.append(button("apply-update","发现新内容，刷新兔窝生效"));
   if (cloudForm) {
     const form = el("form");
     const pass = el("input");
@@ -368,10 +438,10 @@ function paint() {
   page.append(
     el(
       "small",
-      "隐身 " +
-        (view.shortcuts[0] || "使用托盘") +
-        "　·　切层 " +
-        (view.shortcuts[1] || "使用托盘"),
+      (view.shortcuts[0] || "使用" + systemMenu) +
+        " 隐身/仅在桌面/悬浮置顶　·　" +
+        (view.shortcuts[1] || "使用" + systemMenu) +
+        " 开关壁纸",
     ),
   );
 }
@@ -494,6 +564,8 @@ async function command(e) {
   busy = true;
   b.disabled = true;
   try {
+    if(a==="check-update"){await invoke("check_update");updateState=await invoke("update_status");paint();if(!updateState.pending)msg("已经是最新内容。");return;}
+    if(a==="apply-update"){await invoke("apply_ui_update");return;}
     if (["buy", "feed", "place", "letter"].includes(a)) {
       const kind = a === "letter" ? "open-letter" : a;
       const key = kind + ":" + it;
@@ -504,6 +576,7 @@ async function command(e) {
           item: a === "letter" ? null : it,
           letter: a === "letter" ? Number(it) : null,
           requestId: pending.id,
+          ...(a === "place" ? { placed: !home.placed.includes(it) } : {}),
         },
       });
       pending = null;
@@ -524,9 +597,20 @@ async function command(e) {
       view.atmosphere = await invoke("set_atmosphere", { atmosphere: it });
     } else if (a === "play") {
       await opt("playMode", it === "on");
-    } else if (a === "wall") await opt("wallpaper", it === "worker");
-    else if (a === "select") await opt("selectFence");
-    else if (["mode", "patrol", "scene"].includes(a)) await opt(a, it);
+    } else if (a === "autoRest") await opt("autoRest", it === "on");
+    else if (a === "wall") await opt("wallpaper", it === "on");
+    else if (a === "aboveIcons") await opt("wallpaperAboveIcons", it === "on");
+    else if (a === "layer") {
+      await opt("mode", it);
+    } else if (a === "select") await opt("selectFence");
+    else if (a === "scene") {
+      await opt("scene", it);
+      await refresh();
+      return;
+    } else if (a === "gesture") {
+      await opt("gesture", it);
+      return;
+    } else if (["mode", "patrol"].includes(a)) await opt(a, it);
     else if (["folder", "refresh", "close-sheet"].includes(a))
       await opt(a === "close-sheet" ? "close" : a);
     await refresh();
@@ -597,6 +681,7 @@ function closeBook() {
 }
 document.querySelector("#close").onclick = closeBook;
 document.onkeydown = (e) => {
+  if (handleShortcut(e, invoke, view?.shortcuts)) return;
   if (e.key === "Escape") closeBook();
   else if (
     !e.defaultPrevented &&
@@ -651,7 +736,11 @@ await listen("card-open", (e) => {
 
 await listen("desktop-view", (e) => {
   updateView(e.payload);
-  if (live && !cloudForm && (tab !== "album" || !albumLife)) paint();
+  if (live && !cloudForm && (tab !== "album" || !albumLife)) {
+    const slider = document.activeElement?.matches('input[type="range"]') ? document.activeElement.id : null;
+    paint();
+    if (slider) document.getElementById(slider)?.focus({preventScroll:true});
+  }
 });
 
 await listen("wallet-update", () => {

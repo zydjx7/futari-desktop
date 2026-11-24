@@ -1,6 +1,27 @@
-export function clearPack(strip = false) {
+// Leave a little more space in front of the rabbit while keeping ears and feet in frame.
+export function rabbitPortrait(pixels, width, height, left, top, extent, facing) {
+  let x0 = width, y0 = height, x1 = -1, y1 = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (pixels[(y * width + x) * 4 + 3] < 24) continue;
+      x0 = Math.min(x0, x); x1 = Math.max(x1, x);
+      y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+    }
+  }
+  if (x1 < x0) return null;
+  const w = (x1 - x0 + 1) * extent / width;
+  const h = (y1 - y0 + 1) * extent / height;
+  const side = 1.32 * Math.max(w, h);
   return {
-    floor: () => (strip ? 0.77 : 0.25),
+    x: left + (x0 * extent / width) + w / 2 + facing * side * 0.04,
+    y: top + (y0 * extent / height) + h / 2 - side * 0.02,
+    side,
+  };
+}
+
+export function clearPack(strip = false, pointToWalk = false) {
+  return {
+    floor: () => (strip ? 0.77 : pointToWalk ? 0.01 : 0.25),
     depth: () => 0.75,
     wander(i, x) {
       if (i % 5 === 1) return { key: "peek" };
@@ -17,6 +38,16 @@ export function clearPack(strip = false) {
     },
   };
 }
+// One CSS-pixel reference for the pet and its furniture across desktop backgrounds.
+export function desktopSize(width, height, percent = 100) {
+  return Math.max(48, Math.min(82, width * 0.1, height * 0.13)) *
+    Math.max(50, Math.min(200, percent)) / 100;
+}
+
+export function nestDestination(nest, width, height) {
+  return { key: "go", x: (nest.x + nest.w / 2) / width, y: (nest.y + nest.h * .72) / height };
+}
+
 export function field(view, width, height, ratio) {
   const { screen, work } = view.display,
     s = view.settings;
@@ -26,14 +57,9 @@ export function field(view, width, height, ratio) {
     w: work.w / ratio,
     h: work.h / ratio,
   };
-  const base = Math.max(48, Math.min(82, width * 0.1, height * 0.13));
-  if (s.mode === "desktop")
-    return {
-      ...workBox,
-      size: Math.min(base * 1.5, workBox.h * 0.22),
-      strip: false,
-    };
-  if (s.patrol === "full") return { ...workBox, size: base, strip: false };
+  const base = desktopSize(width, height, s.rabbit_scale);
+  if (view.playMode || s.mode === "desktop" || s.patrol === "full")
+    return { ...workBox, size: base, strip: false };
   if (s.patrol === "corner") {
     const w = Math.min(330, workBox.w),
       h = Math.min(216, workBox.h);
