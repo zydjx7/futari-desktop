@@ -60,6 +60,16 @@ export function field(view, width, height, ratio) {
   const base = desktopSize(width, height, s.rabbit_scale);
   if (view.playMode || s.mode === "desktop" || s.patrol === "full")
     return { ...workBox, size: base, strip: false };
+  if (s.patrol === "taskbar") {
+    return {
+      x: workBox.x,
+      y: workBox.y + workBox.h - base * 1.65,
+      w: workBox.w,
+      h: base * 1.65,
+      size: base,
+      strip: true,
+    };
+  }
   if (s.patrol === "corner") {
     const w = Math.min(330, workBox.w),
       h = Math.min(216, workBox.h);
@@ -85,14 +95,7 @@ export function field(view, width, height, ratio) {
       strip: false,
     };
   }
-  return {
-    x: workBox.x,
-    y: workBox.y + workBox.h - base * 1.65,
-    w: workBox.w,
-    h: base * 1.65,
-    size: base,
-    strip: true,
-  };
+  return { ...workBox, size: base, strip: false };
 }
 export function location(field, x, y) {
   const pad = Math.min(field.w * 0.45, field.size * 0.74),

@@ -376,11 +376,12 @@ function paint() {
     row([["autoRest", "偶尔回窝休息", s.auto_rest ? "off" : "on", s.auto_rest]]),
     header("陪工活动区"),
     row([
+      ["patrol", "全屏漫步", "full", s.patrol === "full"],
       ["patrol", isMac ? "程序坞上方" : "任务栏上方", "taskbar", s.patrol === "taskbar"],
       ["patrol", "角落小窝", "corner", s.patrol === "corner"],
       ["select", "划定活动区", null, s.patrol === "custom"],
-      ["patrol", "全屏漫步", "full", s.patrol === "full"],
     ]),
+    el("small", `悬浮置顶默认在整个桌面漫步。选中“${isMac ? "程序坞上方" : "任务栏上方"}”才会限制在底部；选回“全屏漫步”即可解除。`),
     header("兔窝存档"),
   );
   if (s.fence && s.patrol !== "custom")

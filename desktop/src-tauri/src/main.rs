@@ -234,6 +234,19 @@ fn apply_mode(app: &AppHandle, mode: Mode, close: bool) -> Result<()> {
 fn change_mode(app: &AppHandle, mode: Mode) -> Result<()> {
     apply_mode(app, mode, true)
 }
+fn allow_navigation(u: &tauri::Url, expected: &str, stage: bool) -> bool {
+    let local = if cfg!(target_os = "macos") {
+        u.scheme() == "tauri" && u.host_str() == Some("localhost")
+    } else {
+        u.scheme() == "http" && u.host_str() == Some("tauri.localhost")
+    };
+    local
+        && u.port().is_none()
+        // WebKit loads the app root as tauri://localhost, whose path is empty.
+        && (u.path() == expected || (stage && u.path().is_empty()))
+        && u.query().is_none()
+        && u.fragment().is_none()
+}
 fn build_window(app: &AppHandle, label: &str, file: &str) -> tauri::Result<WebviewWindow> {
     let stage = label == "stage";
     let expected = if stage {
@@ -261,18 +274,7 @@ fn build_window(app: &AppHandle, label: &str, file: &str) -> tauri::Result<Webvi
         .resizable(false)
         .disable_drag_drop_handler()
         .devtools(false)
-        .on_navigation(move |u| {
-            let local = if cfg!(target_os = "macos") {
-                u.scheme() == "tauri" && u.host_str() == Some("localhost")
-            } else {
-                u.scheme() == "http" && u.host_str() == Some("tauri.localhost")
-            };
-            local
-                && u.port().is_none()
-                && u.path() == expected
-                && u.query().is_none()
-                && u.fragment().is_none()
-        })
+        .on_navigation(move |u| allow_navigation(u, &expected, stage))
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .build()
 }
@@ -1356,6 +1358,27 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_navigation_loads_empty_root_without_opening_other_routes() {
+        let allowed = |url: &str, expected: &str, stage| {
+            allow_navigation(&tauri::Url::parse(url).unwrap(), expected, stage)
+        };
+        assert!(allowed("tauri://localhost", "/", true));
+        assert!(allowed("tauri://localhost/", "/", true));
+        assert!(allowed("tauri://localhost/card.html", "/card.html", false));
+        assert!(!allowed("tauri://localhost", "/card.html", false));
+        for url in [
+            "tauri://localhost/card.html",
+            "tauri://localhost/?debug=1",
+            "tauri://localhost/#card",
+            "tauri://localhost:1234/",
+            "tauri://example.com/",
+            "https://localhost/",
+        ] {
+            assert!(!allowed(url, "/", true), "unexpected stage navigation: {url}");
+        }
+    }
     #[test]
     fn layer_cycle_and_snow_shortcut() {
         assert_eq!(toggle_step(Mode::Hidden), Mode::Desktop);

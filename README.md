@@ -6,6 +6,8 @@
 
 从 [GitHub Releases](https://github.com/zydjx7/futari-desktop/releases/latest) 的 Assets 下载已发布的平台包。也可以直接克隆源码，在本机编译。
 
+macOS 修复版 0.2.7 保留 0.2.6 的道具拖动、独立缩放和颜色修复，并修复首页白屏与默认陪工活动区。Windows 下载包继续沿用 0.2.6，内容不变。
+
 | 系统 | 文件名 | 快捷键（小兔层级 / 壁纸） |
 | --- | --- | --- |
 | Windows x64 | FUTARI-Desktop-Windows-x64.zip | Alt+Q / Alt+W |

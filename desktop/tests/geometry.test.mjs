@@ -72,3 +72,20 @@ test("desktop scale and nest contact use CSS pixels at every size", () => {
     assert.equal(dest.y * 600, 300 - size * .28);
   }
 });
+
+test("overlay only stays above the Dock when that patrol is selected", () => {
+  const display = { screen: { x: -2400, y: 0 }, work: { x: -2400, y: 80, w: 2400, h: 1400 } };
+  for (const dpi of [1, 1.5, 2]) {
+    const box = patrol => field({display, settings: {mode:"overlay", patrol}},2400/dpi,1600/dpi,dpi);
+    for (const patrol of ["full", undefined]) {
+      const roam = box(patrol);
+      assert.equal(roam.strip, false);
+      assert.equal(roam.h, 1400 / dpi);
+      assert.ok(location(roam,.5,.8).ground - location(roam,.5,.2).ground > 500/dpi);
+    }
+    const dock = box("taskbar");
+    assert.equal(dock.strip, true);
+    assert.ok(Math.abs(location(dock,.5,.2).ground - 1480/dpi) < 1e-9);
+    assert.ok(Math.abs(location(dock,.5,.8).ground - 1480/dpi) < 1e-9);
+  }
+});

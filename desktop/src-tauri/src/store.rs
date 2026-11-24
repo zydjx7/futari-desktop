@@ -110,7 +110,7 @@ impl Default for Settings {
         Self {
             mode: Mode::Overlay,
             last: Mode::Overlay,
-            patrol: Patrol::Taskbar,
+            patrol: Patrol::Full,
             fence: None,
             scene: "clear".into(),
             atmosphere: default_atmosphere(),
@@ -452,6 +452,41 @@ fn fullness(s: &Savings, t: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_nests_roam_freely_and_saved_patrol_choices_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path(), 0).unwrap();
+        assert_eq!(store.settings().patrol, Patrol::Full);
+        for patrol in [Patrol::Taskbar, Patrol::Corner, Patrol::Custom, Patrol::Full] {
+            store.configure(|s| s.patrol = patrol).unwrap();
+            drop(store);
+            store = Store::open(dir.path(), 0).unwrap();
+            assert_eq!(store.settings().patrol, patrol);
+            assert_eq!(store.settings().mode, Mode::Overlay);
+            assert!(!store.settings().wallpaper);
+        }
+    }
+    #[test]
+    fn changing_patrol_preserves_individual_furnishing_layouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let item = ItemId("toastbed".into());
+        {
+            let mut store = Store::open(dir.path(), 0).unwrap();
+            store.configure(|s| {
+                s.furnishings.insert(item.clone(), PropLayout {
+                    position: Some([0.35, 0.6]),
+                    scale: Some(135),
+                });
+                s.patrol = Patrol::Taskbar;
+            }).unwrap();
+            store.configure(|s| s.patrol = Patrol::Full).unwrap();
+        }
+        let store = Store::open(dir.path(), 0).unwrap();
+        let settings = store.settings();
+        assert_eq!(settings.patrol, Patrol::Full);
+        assert_eq!(settings.furnishings[&item].position, Some([0.35, 0.6]));
+        assert_eq!(settings.furnishings[&item].scale, Some(135));
+    }
     #[test]
     fn migrate_wallpaper_from_the_previous_combined_desktop_mode() {
         for (mode, scene, behind, expected) in [
