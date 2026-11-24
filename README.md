@@ -4,7 +4,7 @@
 
 ## 下载
 
-打开 [最新版本的 Assets](https://github.com/zydjx7/futari-desktop/releases/latest)，按系统选择 ZIP。
+从 [GitHub Releases](https://github.com/zydjx7/futari-desktop/releases/latest) 的 Assets 下载已发布的平台包。也可以直接克隆源码，在本机编译。
 
 | 系统 | 文件名 | 快捷键（小兔层级 / 壁纸） |
 | --- | --- | --- |
@@ -14,6 +14,15 @@
 Windows 解压整个目录，双击 FUTARI Desktop.exe。Mac 解压后把 FUTARI Desktop.app 拖到「应用程序」。压缩包附有对应系统的使用说明。
 
 ## 从源码构建
+
+本仓库为私有仓库，克隆需要有访问权限的 GitHub 账号。获取开发分支：
+
+```sh
+git clone https://github.com/zydjx7/futari-desktop.git
+cd futari-desktop
+```
+
+已配置 GitHub SSH 密钥时，克隆地址也可使用 `git@github.com:zydjx7/futari-desktop.git`。要复现某次发行，从仓库根目录切换到对应标签，例如 `git switch --detach v0.2.4`。日后跟进开发分支，运行 `git switch main` 和 `git pull --ff-only`。
 
 使用 Node.js 24 和 Rust stable。Mac 需要 Xcode Command Line Tools，Windows 需要 Visual Studio C++ Build Tools 和 WebView2。从仓库根目录运行：
 
