@@ -12,7 +12,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 // This shell splits movement from window layers. Earlier UI bundles implement
 // the four-state shortcut and include the outline atlases.
-const UI_GENERATION: &str = "0.2.4";
+const UI_GENERATION: &str = "0.2.6";
 pub const LIMIT: usize = 16 << 20;
 pub const ORIGIN: &str = if cfg!(windows) {
     "http://futari-ui.localhost"

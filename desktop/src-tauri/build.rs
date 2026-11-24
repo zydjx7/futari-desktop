@@ -31,6 +31,7 @@ fn main() {
         "focused_shortcut",
         "capture_desktop",
         "update_hit",
+        "move_furnishing",
         "furniture_contact",
         "close_notebook",
         "report_scene",

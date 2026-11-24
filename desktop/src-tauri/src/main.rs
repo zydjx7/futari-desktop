@@ -173,7 +173,7 @@ fn sync(app: &AppHandle, force: bool) {
             s.wallpaper_above_icons,
             c.display,
             conceal_card,
-            (c.play_mode || (s.mode == Mode::Overlay && separate_props)) && !interactive,
+            c.play_mode && !interactive,
             c.play_mode,
             separate_props,
         )
@@ -523,16 +523,30 @@ fn furniture_contact(app: AppHandle, touching: bool) {
     sync(&app, true);
 }
 #[tauri::command]
-fn update_hit(app: AppHandle, hit: Hit) -> Result<()> {
+fn move_furnishing(app: AppHandle, item: store::ItemId, position: [f64; 2]) -> Result<()> {
+    let a = app.state::<App>();
+    {
+        let mut c = a.core();
+        let placed = if c.store.settings().cloud { &c.cloud_placed[..] } else { c.store.placed() };
+        if !placed.contains(&item) || !position.iter().all(|v| (0.0..=1.).contains(v)) {
+            return Err("道具已收起或位置无效".into());
+        }
+        c.store.configure(|s| s.furnishings.entry(item).or_default().position = Some(position))?;
+    }
+    let v = view(&a);
+    for window in ["stage", "card"] { let _ = app.emit_to(window, "desktop-view", &v); }
+    Ok(())
+}
+#[tauri::command]
+fn update_hit(app: AppHandle, hit: Hit, furniture: Option<bool>) -> Result<()> {
     let a = app.state::<App>();
     let c = a.core();
-    if !c.visible || c.selecting || c.camera {
-        return Ok(());
-    }
+    let furniture = furniture.unwrap_or(false);
+    if c.locked || c.selecting || c.camera || (if furniture { c.store.settings().mode == Mode::Desktop } else { !c.visible }) { return Ok(()); }
     if hit.w < 1
         || hit.h < 1
-        || hit.w > 4096
-        || hit.h > 4096
+        || hit.w > (if furniture { c.display.screen.w.max(4096) + 512 } else {4096})
+        || hit.h > (if furniture { c.display.screen.h.max(4096) + 512 } else {4096})
         || hit.x.abs_diff(0) > 32768
         || hit.y.abs_diff(0) > 32768
         || hit.rows.len() > 8192
@@ -545,8 +559,8 @@ fn update_hit(app: AppHandle, hit: Hit) -> Result<()> {
     }
     let top = c.store.settings().mode == Mode::Overlay && !c.at_furniture;
     drop(c);
-    if let Some(w) = ui(&app, "stage") {
-        a.native.shape(hwnd(&w), &hit, top);
+    if let Some(w) = ui(&app, if furniture { "furnishings" } else { "stage" }) {
+        a.native.shape(hwnd(&w), &hit, top && !furniture, furniture);
     }
     Ok(())
 }
@@ -581,7 +595,7 @@ enum Setting {
     WallpaperAboveIcons(bool),
     AutoRest(bool),
     RabbitScale(u16),
-    PropScale(u16),
+    FurnishingScale { item: store::ItemId, percent: u16 },
     Patrol(Patrol),
     Scene(String),
     Wallpaper(bool),
@@ -598,12 +612,15 @@ fn set_option(app: AppHandle, option: Setting) -> Result<()> {
     match option {
         Setting::Mode(m) => return apply_mode(&app, m, m == Mode::Hidden),
         Setting::WallpaperAboveIcons(v) => a.core().store.configure(|s| s.wallpaper_above_icons = v)?,
-        Setting::RabbitScale(v) | Setting::PropScale(v) => {
+        Setting::RabbitScale(v) => {
             if !(50..=200).contains(&v) { return Err("大小应在 50% 到 200% 之间".into()); }
-            a.core().store.configure(|s| match option {
-                Setting::RabbitScale(_) => s.rabbit_scale = v,
-                _ => s.prop_scale = v,
-            })?;
+            a.core().store.configure(|s| s.rabbit_scale = v)?;
+        }
+        Setting::FurnishingScale { item, percent } => {
+            if !(50..=200).contains(&percent) || !store::catalog().get(&item).is_some_and(|p| p.nourishment == 0) {
+                return Err("无效的道具大小".into());
+            }
+            a.core().store.configure(|s| s.furnishings.entry(item).or_default().scale = Some(percent))?;
         }
         Setting::AutoRest(v) => a.core().store.configure(|s| s.auto_rest = v)?,
         Setting::Close => {
@@ -1296,6 +1313,7 @@ fn main() {
             focused_shortcut,
             capture_desktop,
             update_hit,
+            move_furnishing,
             furniture_contact,
             close_notebook,
             report_scene,

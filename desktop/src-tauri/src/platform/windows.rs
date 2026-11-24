@@ -41,7 +41,21 @@ fn send(e: NativeEvent) {
         let _ = s.send(e);
     }
 }
-thread_local! {static DOWN:Cell<Option<(i32,i32,bool)>>=const{Cell::new(None)};}
+thread_local! {
+    static DOWN:Cell<Option<(i32,i32,bool)>>=const{Cell::new(None)};
+    static LAST_DRAG:Cell<Option<(i32,i32)>>=const{Cell::new(None)};
+}
+fn move_pressed(p: POINT) {
+    let Some((x,y,drag)) = DOWN.get() else { return; };
+    if !drag && (p.x-x).abs()+(p.y-y).abs() <= 5 { return; }
+    if !drag {
+        DOWN.set(Some((x,y,true)));
+        send(NativeEvent::DragStart(x,y));
+    }
+    if LAST_DRAG.replace(Some((p.x,p.y))) != Some((p.x,p.y)) {
+        send(NativeEvent::Drag(p.x,p.y));
+    }
+}
 fn cursor() -> POINT {
     unsafe {
         let mut p = POINT::default();
@@ -60,6 +74,11 @@ unsafe extern "system" fn foreground(
 ) {
     send(NativeEvent::Foreground)
 }
+// Screen coordinates recorded with the message stay accurate while a hit window moves.
+unsafe fn pointer_at_message() -> POINT {
+    let xy = GetMessagePos();
+    POINT { x: xy as u16 as i16 as i32, y: (xy >> 16) as u16 as i16 as i32 }
+}
 unsafe extern "system" fn proc(w: HWND, m: u32, a: WPARAM, b: LPARAM) -> LRESULT {
     match m {
         WM_MOUSEACTIVATE => return MA_NOACTIVATE as isize,
@@ -69,33 +88,43 @@ unsafe extern "system" fn proc(w: HWND, m: u32, a: WPARAM, b: LPARAM) -> LRESULT
                 send(NativeEvent::Lock(a == WTS_SESSION_LOCK as usize))
             }
         }
+        // A nonactivating desktop surface can lose mouse messages when the
+        // cursor outruns its small region. Track only this already-started drag.
+        WM_TIMER if a == 2 => {
+            if DOWN.get().is_some() && GetCapture() == w {
+                let p = cursor();
+                move_pressed(p);
+                if GetAsyncKeyState(i32::from(VK_LBUTTON)) >= 0 {
+                    let was = DOWN.take();
+                    KillTimer(w,2);
+                    ReleaseCapture();
+                    if was.is_some_and(|v|v.2) { send(NativeEvent::Drop); }
+                }
+            } else { KillTimer(w,2); }
+        }
         WM_TIMER => send(NativeEvent::Tick),
         WM_RBUTTONDOWN => {
             SetCapture(w);
         }
         WM_LBUTTONDOWN => {
-            let p = cursor();
+            let p = pointer_at_message();
             SetCapture(w);
+            LAST_DRAG.set(None);
             DOWN.set(Some((p.x, p.y, false)));
+            SetTimer(w, 2, 24, None);
         }
         WM_LBUTTONDBLCLK | WM_RBUTTONUP => {
             DOWN.set(None);
             if GetCapture() == w {
                 ReleaseCapture();
             }
-            let p = cursor();
+            let p = pointer_at_message();
             send(NativeEvent::Card(p.x, p.y));
         }
         WM_MOUSEMOVE => {
-            let p = cursor();
-            if let Some((x, y, drag)) = DOWN.get() {
-                if drag || (p.x - x).abs() + (p.y - y).abs() > 5 {
-                    DOWN.set(Some((x, y, true)));
-                    if !drag {
-                        send(NativeEvent::DragStart(x, y));
-                    }
-                    send(NativeEvent::Drag(p.x, p.y));
-                }
+            let p = pointer_at_message();
+            if DOWN.get().is_some() {
+                move_pressed(p);
             } else {
                 use std::sync::atomic::AtomicU64;
                 static LAST_HOVER: AtomicU64 = AtomicU64::new(0);
@@ -109,10 +138,12 @@ unsafe extern "system" fn proc(w: HWND, m: u32, a: WPARAM, b: LPARAM) -> LRESULT
             }
         }
         WM_LBUTTONUP => {
+            move_pressed(pointer_at_message());
+            KillTimer(w,2);
             let was = DOWN.take();
             ReleaseCapture();
             if let Some((_, _, drag)) = was {
-                let p = cursor();
+                let p = pointer_at_message();
                 send(if drag {
                     NativeEvent::Drop
                 } else {
@@ -301,6 +332,7 @@ pub struct Native {
     #[allow(dead_code)]
     desktop_foreground: AtomicBool,
     hit: isize,
+    furniture_input: isize,
     hook: isize,
     key_thread: u32,
     keys: [Option<String>; 2],
@@ -457,8 +489,15 @@ impl PlatformController for Native {
     fn furnishings(&self, window: isize, d: Display, visible: bool, anchor: isize) {
         if visible {
             self.present(window, d, Mode::Desktop, anchor, true, false, false);
+            unsafe {
+                let hit = self.furniture_input as HWND;
+                if IsWindowVisible(hit) != 0 {
+                    let (order, flags) = above(hit, window as HWND);
+                    SetWindowPos(hit, order, 0, 0, 0, 0, flags|SWP_NOACTIVATE|SWP_NOMOVE|SWP_NOSIZE);
+                }
+            }
         } else {
-            unsafe { ShowWindow(window as HWND, SW_HIDE); }
+            unsafe { ShowWindow(self.furniture_input as HWND, SW_HIDE); ShowWindow(window as HWND, SW_HIDE); }
         }
     }
     fn set_ground_input(&self, enabled: bool, walk: bool) {
@@ -484,10 +523,10 @@ impl PlatformController for Native {
             if RegisterClassW(&wc) == 0 {
                 return Err("无法注册桌宠交互窗口".into());
             }
-            let w = CreateWindowExW(
+            let create_input = |title: &str| CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 class.as_ptr(),
-                wide("FUTARI touch").as_ptr(),
+                wide(title).as_ptr(),
                 WS_POPUP,
                 0,
                 0,
@@ -498,10 +537,13 @@ impl PlatformController for Native {
                 inst,
                 null(),
             );
-            if w.is_null() {
+            let w = create_input("FUTARI touch");
+            let furniture = create_input("FUTARI furnishing touch");
+            if w.is_null() || furniture.is_null() {
                 return Err("无法建立桌宠交互窗口".into());
             }
             SetLayeredWindowAttributes(w, 0, 1, LWA_ALPHA);
+            SetLayeredWindowAttributes(furniture, 0, 1, LWA_ALPHA);
             let hook = SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
                 EVENT_SYSTEM_FOREGROUND,
@@ -520,6 +562,7 @@ impl PlatformController for Native {
             Ok(Self {
                 desktop_foreground: AtomicBool::new(false),
                 hit: w as isize,
+                furniture_input: furniture as isize,
                 hook: hook as isize,
                 key_thread,
                 keys,
@@ -714,11 +757,11 @@ impl PlatformController for Native {
             ShowWindow(self.hit as _, SW_HIDE);
         }
     }
-    fn shape(&self, stage: isize, hit: &Hit, top: bool) {
+    fn shape(&self, stage: isize, hit: &Hit, top: bool, furniture: bool) {
         unsafe {
-            let w = self.hit as HWND;
+            let w = (if furniture { self.furniture_input } else { self.hit }) as HWND;
             if hit.rows.is_empty() {
-                self.hide_hit();
+                ShowWindow(w, SW_HIDE);
                 return;
             }
             let rgn = CreateRectRgn(0, 0, 0, 0);
@@ -810,6 +853,7 @@ impl Drop for Native {
             UnhookWinEvent(self.hook as _);
             KillTimer(w, 1);
             WTSUnRegisterSessionNotification(w);
+            DestroyWindow(self.furniture_input as HWND);
             DestroyWindow(w);
         }
     }

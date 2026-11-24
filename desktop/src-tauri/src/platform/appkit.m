@@ -11,13 +11,10 @@ typedef struct { double frame[4], visible[4], primaryTop, scale; } FTScreen;
 static void (*notifyRust)(int,double,double);
 static __weak NSWindow *stage;
 static NSScreen *screen;
-static NSPanel *hitPanel;
-static NSData *runs;
-static NSTimer *hitTimer, *finderTimer;
+static NSPanel *hitPanel, *propPanel;
+static NSTimer *finderTimer;
 static unsigned locks;
-static int hitX, hitY;
-static BOOL interactive, dragging, pressed, desktopActive = YES;
-static NSPoint start;
+static BOOL interactive, desktopActive = YES;
 static void mainSync(dispatch_block_t block) {
     if (NSThread.isMainThread) block(); else dispatch_sync(dispatch_get_main_queue(),block);
 }
@@ -44,16 +41,26 @@ static void pointerEvent(int code) {
     NSPoint p=NSEvent.mouseLocation;
     notifyRust(code,p.x,p.y);
 }
-@interface FTHitView : NSView @end
+@interface FTHitView : NSView {
+    BOOL dragging, pressed;
+    NSPoint start;
+}
+@property(nonatomic,strong) NSData *runs;
+@property(nonatomic,strong) NSTimer *timer;
+@property(nonatomic,weak) NSWindow *surface;
+@property(nonatomic) int offsetX, offsetY;
+- (void)refreshHit;
+- (void)clearHit;
+@end
 @implementation FTHitView
 - (BOOL)isFlipped {return YES;}
 - (void)drawRect:(NSRect)dirty {
     [NSColor.clearColor setFill];
     NSRectFillUsingOperation(dirty,NSCompositingOperationCopy);
-    const int (*r)[4]=runs.bytes;
-    CGFloat scale=stage.backingScaleFactor;
+    const int (*r)[4]=self.runs.bytes;
+    CGFloat scale=self.surface.backingScaleFactor ?: 1;
     [[NSColor colorWithWhite:0 alpha:.01] setFill];
-    for(NSUInteger i=0;i<runs.length/sizeof(*r);i++){
+    for(NSUInteger i=0;i<self.runs.length/sizeof(*r);i++){
         NSRect rect=NSMakeRect(r[i][0]/scale,r[i][1]/scale,(r[i][2]-r[i][0])/scale,(r[i][3]-r[i][1])/scale);
         NSRectFill(rect);
     }
@@ -72,52 +79,57 @@ static void pointerEvent(int code) {
     if(dragging)pointerEvent(7);
 }
 - (void)mouseUp:(NSEvent *)event {
+    if(pressed && dragging)pointerEvent(7);
     if(pressed)pointerEvent(dragging ? 8 : 4);
     pressed=NO;dragging=NO;
 }
 - (void)rightMouseDown:(NSEvent *)event {pointerEvent(5);}
+- (void)refreshHit {
+    BOOL hit = pressed;
+    if (self.surface.visible && self.runs.length && !hit) {
+        NSPoint p=[self.surface convertPointFromScreen:NSEvent.mouseLocation];
+        CGFloat s=self.surface.backingScaleFactor;
+        int x=floor(p.x*s)-self.offsetX, y=floor((self.surface.frame.size.height-p.y)*s)-self.offsetY;
+        const int (*r)[4]=self.runs.bytes;
+        for(NSUInteger i=0;i<self.runs.length/sizeof(*r);i++)
+            if(x>=r[i][0] && x<r[i][2] && y>=r[i][1] && y<r[i][3]){hit=YES;break;}
+    }
+    self.window.ignoresMouseEvents=!hit;
+}
+- (void)clearHit {
+    if(dragging)pointerEvent(8);
+    pressed=dragging=NO;
+    [self.timer invalidate];self.timer=nil;self.runs=nil;
+    self.window.ignoresMouseEvents=YES;[self.window orderOut:nil];
+}
 @end
 @interface FTHitPanel : NSPanel @end
 @implementation FTHitPanel
 - (BOOL)canBecomeKeyWindow {return NO;}
 - (BOOL)canBecomeMainWindow {return NO;}
 @end
-static BOOL containsMouse(void) {
-    if(!stage.visible || interactive || !runs.length)return NO;
-    if(pressed)return YES;
-    NSPoint p=[stage convertPointFromScreen:NSEvent.mouseLocation];
-    CGFloat scale=stage.backingScaleFactor;
-    int x=floor(p.x*scale)-hitX,y=floor((stage.frame.size.height-p.y)*scale)-hitY;
-    const int (*r)[4]=runs.bytes;
-    for(NSUInteger i=0;i<runs.length/sizeof(*r);i++)
-        if(x>=r[i][0] && x<r[i][2] && y>=r[i][1] && y<r[i][3])return YES;
-    return NO;
-}
-static void refreshHit(void){hitPanel.ignoresMouseEvents=!containsMouse();}
-static void hideHit(void) {
-    if(dragging)pointerEvent(8);
-    pressed=dragging=NO;
-    [hitTimer invalidate];hitTimer=nil;runs=nil;
-    hitPanel.ignoresMouseEvents=YES;[hitPanel orderOut:nil];
-}
+static void hideHit(void){[(FTHitView *)hitPanel.contentView clearHit];}
 void ft_hide_hit(void){mainSync(^{hideHit();});}
-void ft_shape(intptr_t window,int x,int y,const int (*rows)[4],size_t count) {
+void ft_shape(intptr_t window,int x,int y,const int (*rows)[4],size_t count,bool furniture) {
     mainSync(^{
-        if(!stage.visible || interactive || !count){hideHit();return;}
-        hitX=x;hitY=y;runs=[NSData dataWithBytes:rows length:count*sizeof(*rows)];
+        NSWindow *surface=(__bridge NSWindow *)(void *)window;
+        NSPanel *panel=furniture ? propPanel : hitPanel;
+        FTHitView *v=(FTHitView *)panel.contentView;
+        if(!surface.visible || interactive || !count){[v clearHit];return;}
+        v.surface=surface;v.offsetX=x;v.offsetY=y;
+        v.runs=[NSData dataWithBytes:rows length:count*sizeof(*rows)];
         int width=0,height=0;
         for(size_t i=0;i<count;i++){width=MAX(width,rows[i][2]);height=MAX(height,rows[i][3]);}
-        CGFloat s=stage.backingScaleFactor;
-        NSRect frame=NSMakeRect(NSMinX(stage.frame)+x/s,NSMaxY(stage.frame)-(y+height)/s,width/s,height/s);
-        [hitPanel setFrame:frame display:NO];
-        [hitPanel.contentView setNeedsDisplay:YES];
-        if(!hitTimer){
-            hitPanel.level=stage.level;
-            [hitPanel orderWindow:NSWindowAbove relativeTo:stage.windowNumber];
-            hitTimer=[NSTimer timerWithTimeInterval:1./60 repeats:YES block:^(NSTimer *t){refreshHit();}];
-            [NSRunLoop.mainRunLoop addTimer:hitTimer forMode:NSRunLoopCommonModes];
+        CGFloat s=surface.backingScaleFactor;
+        [panel setFrame:NSMakeRect(NSMinX(surface.frame)+x/s,NSMaxY(surface.frame)-(y+height)/s,width/s,height/s) display:NO];
+        [v setNeedsDisplay:YES];
+        panel.level=surface.level;
+        [panel orderWindow:NSWindowAbove relativeTo:surface.windowNumber];
+        if(!v.timer){
+            v.timer=[NSTimer timerWithTimeInterval:1./60 repeats:YES block:^(NSTimer *t){[v refreshHit];}];
+            [NSRunLoop.mainRunLoop addTimer:v.timer forMode:NSRunLoopCommonModes];
         }
-        refreshHit();
+        [v refreshHit];
     });
 }
 static BOOL external(void) {
@@ -233,7 +245,7 @@ void ft_wallpaper(intptr_t window,bool visible,bool above) {
 void ft_furnishings(intptr_t window,bool visible) {
     mainSync(^{
         NSWindow *w=(__bridge NSWindow *)(void *)window;
-        if (!visible) { [w orderOut:nil]; return; }
+        if (!visible) { [(FTHitView *)propPanel.contentView clearHit]; [w orderOut:nil]; return; }
         if (!w.contentView.contentFilters.count) {
             WKWebView *web=webview(w.contentView);
             web.underPageBackgroundColor=NSColor.clearColor;
@@ -242,6 +254,7 @@ void ft_furnishings(intptr_t window,bool visible) {
             w.contentView.contentFilters=@[matteFilter()];
         }
         ft_wallpaper(window,true,true);
+        if(propPanel.visible) [propPanel orderWindow:NSWindowAbove relativeTo:w.windowNumber];
     });
 }
 void ft_present(intptr_t window,bool visible,bool active,bool top,bool desktop) {
@@ -312,17 +325,21 @@ static OSStatus shortcutPressed(EventHandlerCallRef next, EventRef event, void *
     return noErr;
 }
 
+static NSPanel *makeHitPanel(void){
+    NSPanel *panel=[[FTHitPanel alloc] initWithContentRect:NSZeroRect styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    panel.contentView=[FTHitView new];panel.opaque=NO;
+    // An entirely clear native window is omitted from WindowServer hit testing.
+    panel.backgroundColor=NSColor.clearColor;
+    panel.hasShadow=NO;panel.hidesOnDeactivate=NO;panel.ignoresMouseEvents=YES;
+    panel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorIgnoresCycle;
+    return panel;
+}
 void ft_install(void (*callback)(int,double,double), int registered[2]){
     notifyRust=callback;
     // Tauri sets the Accessory policy during setup, before its launch callbacks.
     screen=NSScreen.mainScreen;
     for(NSScreen *s in NSScreen.screens)if(NSPointInRect(NSEvent.mouseLocation,s.frame)){screen=s;break;}
-    hitPanel=[[FTHitPanel alloc] initWithContentRect:NSZeroRect styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
-    hitPanel.contentView=[FTHitView new];hitPanel.opaque=NO;
-    // An entirely clear native window is omitted from WindowServer hit testing.
-    hitPanel.backgroundColor=NSColor.clearColor;
-    hitPanel.hasShadow=NO;hitPanel.hidesOnDeactivate=NO;hitPanel.ignoresMouseEvents=YES;
-    hitPanel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorIgnoresCycle;
+    hitPanel=makeHitPanel();propPanel=makeHitPanel();
     EventTypeSpec pressed = { kEventClassKeyboard, kEventHotKeyPressed };
     if (InstallApplicationEventHandler(shortcutPressed, 1, &pressed, NULL, NULL) == noErr) {
         const UInt32 codes[] = { kVK_ANSI_J, kVK_ANSI_K };

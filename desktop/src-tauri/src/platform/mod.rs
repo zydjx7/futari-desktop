@@ -84,7 +84,7 @@ pub trait PlatformController: Send + Sync {
         interactive: bool,
         topmost: bool,
     );
-    fn shape(&self, stage: isize, hit: &Hit, top: bool);
+    fn shape(&self, stage: isize, hit: &Hit, top: bool, furniture: bool);
     fn hide_hit(&self);
     fn card_position(&self, card: isize, x: i32, y: i32, display: Display);
     fn open_scenes(&self, path: &Path) -> Result<()>;

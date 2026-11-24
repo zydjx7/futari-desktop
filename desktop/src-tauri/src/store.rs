@@ -80,6 +80,15 @@ impl Fence {
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(default)]
+pub struct PropLayout {
+    pub position: Option<[f64; 2]>,
+    pub scale: Option<u16>,
+}
+impl Default for PropLayout {
+    fn default() -> Self { Self { position: None, scale: None } }
+}
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(default)]
 pub struct Settings {
     pub mode: Mode,
     pub last: Mode,
@@ -92,7 +101,8 @@ pub struct Settings {
     pub wallpaper_above_icons: bool,
     pub auto_rest: bool,
     pub rabbit_scale: u16,
-    pub prop_scale: u16,
+    pub prop_scale: u16, // Default inherited from previously saved baskets.
+    pub furnishings: BTreeMap<ItemId, PropLayout>,
     pub cloud: bool,
 }
 impl Default for Settings {
@@ -109,6 +119,7 @@ impl Default for Settings {
             auto_rest: true,
             rabbit_scale: 100,
             prop_scale: 100,
+            furnishings: BTreeMap::new(),
             cloud: false,
         }
     }

@@ -26,7 +26,7 @@ extern "C" {
         desktop: bool,
     );
     fn ft_wallpaper(window: isize, visible: bool, above: bool);
-    fn ft_shape(stage: isize, x: i32, y: i32, rows: *const [i32; 4], count: usize);
+    fn ft_shape(stage: isize, x: i32, y: i32, rows: *const [i32; 4], count: usize, furniture: bool);
     fn ft_hide_hit();
     fn ft_card(window: isize, x: f64, y: f64);
     fn ft_hide(window: isize);
@@ -113,8 +113,8 @@ impl PlatformController for Native {
     ) {
         unsafe { ft_present(w, visible, interactive, top, mode == Mode::Desktop) };
     }
-    fn shape(&self, w: isize, h: &Hit, _: bool) {
-        unsafe { ft_shape(w, h.x, h.y, h.rows.as_ptr(), h.rows.len()) }
+    fn shape(&self, w: isize, h: &Hit, _: bool, furniture: bool) {
+        unsafe { ft_shape(w, h.x, h.y, h.rows.as_ptr(), h.rows.len(), furniture) }
     }
     fn hide_hit(&self) {
         unsafe { ft_hide_hit() }

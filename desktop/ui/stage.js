@@ -6,7 +6,7 @@ import { RabbitLife } from "./vendor/movement.js";
 import { createPaper } from "./vendor/scenes/paper.js";
 import { image, loadScenery } from "./scenery.js";
 import { bowl, tunnelBack, tunnelFront, tunnelPlacement, nightLight } from "./vendor/props.js";
-import { daylight, lightWash, nightFigure, nightPrint } from "./vendor/light.js";
+import { daylight, lightWash, nightFigure } from "./vendor/light.js";
 import {
   icon,
   loadGoods, paintIcon, furnishingSize, furnitureTask, snackTask, drawFurnishing, petals,
@@ -78,13 +78,30 @@ function sendFurniture() {
       const c = tile.getContext("2d");
       c.scale(ratio,ratio);
       c.translate(-x,-y);
-      if (o.name === "tunnel") c.drawImage(wash?.night ? nightPrint(sprites.back) : sprites.back, o.x,o.y,o.w,o.h);
+      if (o.name === "tunnel") c.drawImage(sprites.back, o.x,o.y,o.w,o.h);
       if (o.name === "ball") o.shape = willowShape(o.x+o.w/2,o.base,o.w,ballAngle);
       groundThing(c,o);
       tiles.push({x,y,width,height,pixels:c.getImageData(0,0,tile.width,tile.height)});
     }
   }
   publishFurniture({tiles});
+  if (!separateFurniture()) return;
+  // A second pixel-shaped input surface stays with these tiles at desktop level.
+  // Empty desktop and windows covering a furnishing keep their native mouse input.
+  const dpr = devicePixelRatio || 1;
+  const rows = [];
+  for (const {x,y,width,height,pixels} of tiles) {
+    const shape = alphaRunsBox(pixels.data,pixels.width,pixels.height,width,height,dpr);
+    for (const [l,t,r,b] of shape.rows) rows.push([l+Math.round(x*dpr),t+Math.round(y*dpr),
+      r+Math.round(x*dpr),b+Math.round(y*dpr)]);
+  }
+  const x = rows.reduce((v,r) => Math.min(v,r[0]),Infinity);
+  const y = rows.reduce((v,r) => Math.min(v,r[1]),Infinity);
+  const hit = rows.length ? {
+    x,y,w:rows.reduce((v,r)=>Math.max(v,r[2]-x),1),h:rows.reduce((v,r)=>Math.max(v,r[3]-y),1),
+    rows:rows.map(([l,t,r,b]) => [l-x,t-y,r-x,b-y]),
+  } : {x:0,y:0,w:1,h:1,rows:[]};
+  invoke("update_hit",{hit,furniture:true}).catch(console.error);
 }
 
 function propSprite(fn, x, y, w, h, grain) {
@@ -174,6 +191,7 @@ let scene = null,
   box = null,
   dragOffset = null,
   dragActive = false,
+  propDrag = null,
   things = [],
   layers = [],
   wash = null,
@@ -324,14 +342,19 @@ function layout() {
   currentLight = daylight(view.atmosphere || "auto");
   lastLightKey = (view.atmosphere || "auto") + ":" + currentLight;
   const placed = view.placed || [];
-  const propBase = desktopSize(w, h, view.settings.prop_scale);
-  const unit = view.camera ? Math.min(w, h * 1.45) * (scene.propScale ?? 0.79) : propBase * 5;
-  for (const [anchor, [x, z]] of Object.entries(scene.props || {})) {
+  const area = workMetrics(view,w,h);
+  for (const [anchor, [defaultX, defaultZ]] of Object.entries(scene.props || {})) {
     const name = anchor === "bed" ? (placed.find(id=>["toastbed","knitbed"].includes(id)) || "bed")
         : anchor === "lamp" && placed.includes("lantern") ? "lantern" : anchor;
       if ((name !== "lamp" || scene.id === "desktop") && !placed.includes(name)) continue;
     if (name === "lantern" && currentLight === "day") continue;
       if (name === "lamp" && currentLight !== "night") continue;
+    const settings = view.settings.furnishings?.[name];
+    const saved = !view.camera && (propDrag?.name === name ? propDrag.position : settings?.position);
+    const x = saved ? area.wx + saved[0]*area.ww : defaultX;
+    let z = saved ? area.wy + saved[1]*area.wh : defaultZ;
+    const propBase = desktopSize(w,h,settings?.scale ?? view.settings.prop_scale);
+    const unit = view.camera ? Math.min(w,h*1.45)*(scene.propScale ?? .79) : propBase*5;
     const approachY = z + 0.04;
     let width, left;
     if (name === "tunnel") {
@@ -346,9 +369,27 @@ function layout() {
     }
     const tile = sprites[name],
       height = tile ? (width * tile.height) / tile.width : width;
+    if (saved) {
+      left = clamp(x*w-width/2, area.wx*w, Math.max(area.wx*w,(area.wx+area.ww)*w-width));
+      const foot = name === "bed" ? height*.17 : 0;
+      let minBase = area.wy+(height-foot)/h, maxBase = area.wy+area.wh-foot/h;
+      if (isNest(name)) {
+        // Keep the resting point inside RabbitLife's reachable floor at screen edges.
+        const center = clamp((left+width/2)/w,.07,.93);
+        left = clamp(center*w-width/2,area.wx*w,(area.wx+area.ww)*w-width);
+        const contactOffset = (height*.28-foot)/h;
+        minBase = Math.max(minBase,scene.floor(center)+contactOffset);
+        maxBase = Math.min(maxBase,.952+contactOffset);
+      }
+      z = clamp(z,minBase,maxBase);
+    }
     const base = z * h,
       bottom = base + (name === "bed" ? height * 0.17 : 0);
-    if (name === "ball") ballX = clamp(ballX ?? x, ...ballRange(width, z, w, h));
+    if (name === "ball") {
+      if (propDrag?.name === "ball" && saved) ballX = (left+width/2)/w;
+      ballX = clamp(ballX ?? (left == null ? x : (left+width/2)/w), ...ballRange(width,z,w,h));
+      left = ballX*w-width/2;
+    }
     things.push({
       name,
       z: ["bed","mat","toastbed","knitbed"].includes(name) ? z - 0.155 : z,
@@ -508,13 +549,13 @@ function groundThing(c, o) {
     c.restore();
     return;
   }
-  const night = Boolean(wash?.night);
+  // Movable furniture keeps its painted colors on both the wallpaper and the transparent desktop.
   if (o.name === "ball")
-    return paintWillow(c, night ? nightPrint(icons) : icons, o.shape);
+    return paintWillow(c, icons, o.shape);
   if (o.name === "bed") {
     c.save();
     c.translate(o.x + o.w / 2, o.y + o.h / 2);
-    paintIcon(c, night ? nightPrint(icons) : icons, o.name, 0, 0, o.w);
+    paintIcon(c, icons, o.name, 0, 0, o.w);
     c.restore();
     return;
   }
@@ -536,7 +577,7 @@ function groundThing(c, o) {
   }
   const tile = sprites[o.name];
   c.drawImage(
-    night && o.name !== "lamp" ? nightPrint(tile) : tile,
+    tile,
     o.x,
     o.y,
     o.w,
@@ -645,8 +686,8 @@ function act(key, item, atBowl = false) {
     life.issue(trip);
   } else if (key === "eat" && atBowl && things.some(o => o.name === "bowl")) {
     food = item || preferredFood;
-    const [x, y] = scene.props.bowl;
-    life.go(x + 0.052, y - 0.026, snackTask(item));
+    const bowl = things.find(o => o.name === "bowl");
+    life.go((bowl.x+bowl.w)/innerWidth, bowl.base/innerHeight-.012, snackTask(item));
   } else {
     if (key === "eat") food = item || preferredFood;
     life.issue(key === "eat" ? snackTask(item) : { key });
@@ -1016,6 +1057,8 @@ const camera = createCamera(
 
 async function apply(v) {
   const prev = view;
+  if (propDrag && (v.camera || v.selecting || prev?.settings.mode !== v.settings.mode ||
+      !v.placed.includes(propDrag.name))) propDrag=null;
   view = v;
   if (!prev || prev.settings.cloud !== v.settings.cloud || (!prev.visible && v.visible)) refreshSatiety();
   if (v.name) camera.setName(v.name);
@@ -1109,6 +1152,7 @@ async function apply(v) {
   } else if (
     scene &&
     (prev?.atmosphere !== v.atmosphere || prev?.settings.prop_scale !== v.settings.prop_scale ||
+      JSON.stringify(prev?.settings.furnishings) !== JSON.stringify(v.settings.furnishings) ||
       JSON.stringify(prev?.placed) !== JSON.stringify(v.placed))
   ) {
     layout();
@@ -1280,7 +1324,7 @@ function draw(t) {
     }
     if (log)
       terrain.drawImage(
-        wash?.night ? nightPrint(sprites.back) : sprites.back,
+        sprites.back,
         log.x,
         log.y,
         log.w,
@@ -1507,6 +1551,21 @@ function handleHover(x, y, now) {
 
 await listen("gesture", ({ payload: key }) => {
   if (key === "drop") {
+    if (propDrag) {
+      const {name,position} = propDrag;
+      propDrag = null;
+      if (position) {
+        const layouts = view.settings.furnishings ??= {};
+        const previous = layouts[name];
+        layouts[name] = {...previous,position};
+        if (name === "ball") ballX = null;
+        layout();
+        invoke("move_furnishing",{item:name,position}).catch(error => {
+          if (layouts[name]?.position === position) { layouts[name] = previous; layout(); }
+          console.error(error);
+        });
+      }
+    }
     if (dragActive && dragOffset) life.dropped();
     dragOffset = null;
     dragActive = false;
@@ -1552,11 +1611,32 @@ await listen("drag-start", ({ payload: [px, py] }) => {
   const ratio = devicePixelRatio || 1;
   const cx = px / ratio,
     cy = py / ratio;
-  dragActive = hitsRabbit(cx, cy);
+  if (view?.camera || view?.selecting) return;
+  dragActive = view?.visible && hitsRabbit(cx, cy);
+  const obj = !dragActive && [...things].sort((a,b)=>b.z-a.z).find(o =>
+    view.placed.includes(o.name) && propAt(cx,cy,o));
+  propDrag = obj ? {name:obj.name, dx:obj.x+obj.w/2-cx, dy:obj.base-cy,
+    position:view.settings.furnishings?.[obj.name]?.position} : null;
+  if (obj?.name === "ball") rolling = null;
   dragOffset = null;
 });
 
 await listen("drag-pet", ({ payload: [x, y] }) => {
+  if (propDrag) {
+    const {wx,wy,ww,wh} = workMetrics(view,innerWidth,innerHeight);
+    const position = [
+      clamp(((x/devicePixelRatio+propDrag.dx)/innerWidth-wx)/ww),
+      clamp(((y/devicePixelRatio+propDrag.dy)/innerHeight-wy)/wh),
+    ];
+    if (position.every((value,i)=>value === propDrag.position?.[i])) return;
+    propDrag.position = position;
+    if (!propDrag.scheduled) {
+      const draft = propDrag;
+      draft.scheduled = true;
+      requestAnimationFrame(() => { draft.scheduled = false; layout(); });
+    }
+    return;
+  }
   if (!box || !dragActive) return;
   const px = x / devicePixelRatio,
     py = y / devicePixelRatio;

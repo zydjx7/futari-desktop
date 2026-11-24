@@ -178,7 +178,7 @@ function wallpaperControls() {
   ];
 }
 
-function sizeControl(title, kind, saved) {
+function sizeControl(title, kind, saved, item) {
   const label = el("label", title + " ");
   const output = el("output", saved + "%");
   const slider = el("input");
@@ -190,7 +190,7 @@ function sizeControl(title, kind, saved) {
   slider.value = saved;
   slider.setAttribute("aria-label", title);
   slider.oninput = () => { output.textContent = slider.value + "%"; };
-  slider.onchange = () => opt(kind, slider.valueAsNumber).catch(error => {
+  slider.onchange = () => opt(kind, item ? {item, percent:slider.valueAsNumber} : slider.valueAsNumber).catch(error => {
     slider.value = saved;
     output.textContent = saved + "%";
     msg(error);
@@ -260,6 +260,13 @@ function paint() {
         desktop: true,
       }),
     );
+    if (tab === "bag" && detail && home?.inventory[detail] && home.shop[detail]?.nourishment === 0) {
+      page.querySelector(".item-postcard").append(
+        sizeControl(home.shop[detail].name+"大小", "furnishingScale",
+          s.furnishings?.[detail]?.scale ?? s.prop_scale, detail),
+        el("small", "摆到桌面后，按住道具拖到想放的位置，松手保存。"),
+      );
+    }
     if (cloudProblem)
       page.prepend(el("small", "上次同步的内容 · 恢复网络后会自动更新"));
     if (tab === "bag" && !detail) {
@@ -364,7 +371,7 @@ function paint() {
     ...wallpaperControls(),
     header("桌面大小"),
     sizeControl("兔子", "rabbitScale", s.rabbit_scale),
-    sizeControl("道具", "propScale", s.prop_scale),
+    el("small", "道具大小可在小篮子里单独调节。"),
     header("兔窝"),
     row([["autoRest", "偶尔回窝休息", s.auto_rest ? "off" : "on", s.auto_rest]]),
     header("陪工活动区"),
