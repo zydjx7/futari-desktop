@@ -1,50 +1,86 @@
 name: FUTARI Desktop macOS
-on:
-  workflow_dispatch:
-    inputs:
-      runner:
-        description: 构建机（Sonoma 需自托管并添加 macos-14 标签）
-        type: choice
-        default: macos-15
-        options:
-          - macos-15
-          - self-hosted-macos-14
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:
-  build:
-    runs-on: ${{ inputs.runner == 'self-hosted-macos-14' && fromJSON('["self-hosted","macOS","macos-14"]') || 'macos-15' }}
-    env:
-      MACOSX_DEPLOYMENT_TARGET: "12.0"
-      CARGO_TARGET_DIR: ${{ github.workspace }}/desktop/build/cargo
+  signed-ui:
+    runs-on: macos-15
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - run: rustup update stable && rustup override set stable
-      - run: node desktop/scripts/prepare.mjs
-      - run: node --test desktop/tests/*.test.mjs
-      - run: cargo test --target "$(rustc --print host-tuple)" --locked --release --features cloud-sync --manifest-path desktop/src-tauri/Cargo.toml
-      - run: bash desktop/scripts/build-macos.sh --universal
-      - name: Verify archived universal application
+      - name: Download the distributed Mac app and signed resource release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          tmp="$(mktemp -d)"
-          ditto -x -k desktop/dist/FUTARI-Desktop-macOS.zip "$tmp"
-          app="$tmp/FUTARI Desktop.app"
-          codesign --verify --strict --verbose=2 "$app"
-          lipo "$app/Contents/MacOS/futari-desktop" -verify_arch arm64 x86_64
-          test -x "$app/Contents/MacOS/futari-desktop"
-          "$app/Contents/MacOS/futari-desktop" --verify-profile &
+          cd "$RUNNER_TEMP"
+          gh release download v0.2.8 -R "$GITHUB_REPOSITORY" -p FUTARI-Desktop-macOS.zip
+          gh release download ui-2026.11.25.1 -R "$GITHUB_REPOSITORY" -p manifest.json -p 'ui-*.zip'
+          ditto -x -k FUTARI-Desktop-macOS.zip app
+          codesign --verify --strict 'app/FUTARI Desktop.app'
+      - name: Verify release signature, size, hashes and exact art
+        run: |
+          cd "$RUNNER_TEMP"
+          node --input-type=module <<'JS'
+          import {readFileSync} from 'node:fs';
+          import {verify,createPublicKey,createHash} from 'node:crypto';
+          import assert from 'node:assert/strict';
+          const {ui} = JSON.parse(readFileSync('manifest.json'));
+          const data = readFileSync('ui-2026.11.25.1.zip');
+          const key = readFileSync(process.env.GITHUB_WORKSPACE+'/desktop/src-tauri/update-public-key.bin');
+          const publicKey = createPublicKey({format:'der',type:'spki',key:Buffer.concat([Buffer.from('302a300506032b6570032100','hex'), key])});
+          assert.equal(ui.version,'2026.11.25.1');
+          assert.equal(ui.minAppVersion,'0.2.8');
+          assert.equal(data.length,ui.size);
+          assert.equal(createHash('sha256').update(data).digest('hex'),ui.sha256);
+          assert(verify(null,data,publicKey,Buffer.from(ui.signature,'base64')));
+          JS
+          unzip -oq ui-2026.11.25.1.zip -d payload
+          for atlas in caramel actions; do
+            cmp "payload/art/$atlas.webp" "$GITHUB_WORKSPACE/src/modules/rabbit/art/$atlas.webp"
+          done
+      - name: Boot the archived old app with the selected release in its test profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          bin="$RUNNER_TEMP/app/FUTARI Desktop.app/Contents/MacOS/futari-desktop"
+          "$bin" --verify-profile > first-launch.log 2>&1 &
           pid=$!
-          sleep 6
+          root="$HOME/Library/Application Support/app.futari.desktop/acceptance/ui-cache/0.2.8"
+          for i in {1..30}; do test -d "$root/releases" && break; sleep 1; done
+          test -d "$root/releases"
+          kill "$pid"
+          wait "$pid" || true
+          ver=2026.11.25.1
+          mv payload "$root/releases/$ver"
+          echo '{"active":"2026.11.25.1","pending":null,"failed":[]}' > "$root/state.json"
+          sudo fs_usage -w -f filesys -t 45 futari-desktop > "$RUNNER_TEMP/file-access.log" 2>&1 &
+          tracer=$!
+          sleep 2
+          "$bin" --verify-profile > updated-launch.log 2>&1 &
+          pid=$!
+          for i in {1..28}; do
+            grep -Fq "/$ver/art/actions.webp" file-access.log && break
+            sleep 1
+          done
+          sleep 4
           kill -0 "$pid"
           kill "$pid"
-          shasum -a 256 desktop/dist/FUTARI-Desktop-macOS.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: FUTARI-Desktop-macOS
-          path: desktop/dist/FUTARI-Desktop-macOS.zip
-          if-no-files-found: error
+          wait "$pid" || true
+          wait "$tracer" || true
+          cat "$root/state.json"
+          jq -e '.active=="2026.11.25.1" and .failed==[]' "$root/state.json"
+          for asset in stage.js art/caramel.webp art/actions.webp; do
+            grep -F "/$ver/$asset" file-access.log | head -n 2 || true
+            grep -Fq "/$ver/$asset" file-access.log
+          done
+      - name: Diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          tail -c 6000 updated-launch.log || true
+          grep -Ei 'ui-cache|not permitted|error' file-access.log | tail -n 25 || true
+          find "$HOME/Library/Application Support" -path '*/acceptance/ui-cache*' -maxdepth 6 | head -n 12 || true
