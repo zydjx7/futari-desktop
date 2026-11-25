@@ -55,12 +55,15 @@ jobs:
           wait "$pid" || true
           ver=2026.11.25.1
           mv payload "$root/releases/$ver"
-          echo '{"active":"2026.11.25.1","pending":null,"failed":[]}' > "$root/state.json"
+          echo '{"active":null,"pending":"2026.11.25.1","failed":[]}' > "$root/state.json"
+          swiftc "$GITHUB_WORKSPACE/.github/test-mac-update.swift" -o click-update
           sudo fs_usage -w -f filesys -t 45 futari-desktop > "$RUNNER_TEMP/file-access.log" 2>&1 &
           tracer=$!
           sleep 2
           "$bin" --verify-profile > updated-launch.log 2>&1 &
           pid=$!
+          sleep 3
+          ./click-update "$pid"
           for i in {1..28}; do
             grep -Fq "/$ver/art/actions.webp" file-access.log && break
             sleep 1
