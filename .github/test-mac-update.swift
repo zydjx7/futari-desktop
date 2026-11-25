@@ -32,6 +32,15 @@ func press(_ label: String, role: String, root: () -> AXUIElement) {
 }
 func tray() -> AXUIElement { if let e = value(app,"AXExtrasMenuBar") { return e as! AXUIElement }; return app }
 press("",role:"AXMenuBarItem",root:tray)
-press("翻开手账",role:"AXMenuItem",root:tray)
+func key(_ code: CGKeyCode) {
+    for down in [true,false] {
+        CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)?.post(tap:.cghidEventTap)
+        Thread.sleep(forTimeInterval:0.06)
+    }
+}
+Thread.sleep(forTimeInterval:0.6)
+key(115) // Home selects the first item.
+for _ in 0..<6 { key(125) }
+key(36)
 press("设置",role:"AXButton",root:{app})
 press("发现新内容",role:"AXButton",root:{app})
