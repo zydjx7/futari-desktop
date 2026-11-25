@@ -44,8 +44,13 @@ export function desktopSize(width, height, percent = 100) {
     Math.max(50, Math.min(200, percent)) / 100;
 }
 
+// Rest just inside the raised front rim of the linen bed.
+export function nestRestFraction(name) {
+  return name === "bed" ? 0.63 : 0.72;
+}
+
 export function nestDestination(nest, width, height) {
-  return { key: "go", x: (nest.x + nest.w / 2) / width, y: (nest.y + nest.h * .72) / height };
+  return { key: "go", x: (nest.x + nest.w / 2) / width, y: (nest.y + nest.h * nestRestFraction(nest.name)) / height };
 }
 
 export function field(view, width, height, ratio) {

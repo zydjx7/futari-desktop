@@ -1,0 +1,28 @@
+name: FUTARI Desktop Windows
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/desktop/build/cargo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node desktop/scripts/prepare.mjs
+      - shell: bash
+        run: node --test desktop/tests/*.test.mjs
+      - run: cargo +stable test --locked --release --features cloud-sync --manifest-path desktop/src-tauri/Cargo.toml
+      - shell: pwsh
+        run: ./desktop/scripts/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: desktop/dist/FUTARI-Desktop-Windows-x64.zip
+          if-no-files-found: error

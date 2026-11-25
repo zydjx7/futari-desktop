@@ -66,10 +66,14 @@ test("desktop scale and nest contact use CSS pixels at every size", () => {
     assert.equal(field(view,1920,1080,1).size, 82 * .75);
   }
   for (const size of [50,100,200]) {
-    const bed = {x:400-size/2,y:300-size,w:size,h:size};
+    const bed = {name:"bed",x:400-size/2,y:300-size,w:size,h:size};
     const dest = nestDestination(bed, 1000, 600);
     assert.equal(dest.x, .4);
-    assert.equal(dest.y * 600, 300 - size * .28);
+    assert.ok(Math.abs(dest.y * 600 - (300 - size * .37)) < 1e-9);
+    for (const name of ["knitbed", "toastbed"]) {
+      const other = nestDestination({...bed, name}, 1000, 600);
+      assert.ok(Math.abs(other.y * 600 - (300 - size * .28)) < 1e-9);
+    }
   }
 });
 

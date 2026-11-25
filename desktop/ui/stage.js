@@ -21,6 +21,7 @@ import { handleShortcut } from "./shortcuts.js";
 import {
   desktopSize,
   nestDestination,
+  nestRestFraction,
   alphaRuns,
   alphaRunsBox,
   rabbitPortrait,
@@ -377,7 +378,7 @@ function layout() {
         // Keep the resting point inside RabbitLife's reachable floor at screen edges.
         const center = clamp((left+width/2)/w,.07,.93);
         left = clamp(center*w-width/2,area.wx*w,(area.wx+area.ww)*w-width);
-        const contactOffset = (height*.28-foot)/h;
+        const contactOffset = (height * (1 - nestRestFraction(name)) - foot) / h;
         minBase = Math.max(minBase,scene.floor(center)+contactOffset);
         maxBase = Math.min(maxBase,.952+contactOffset);
       }
