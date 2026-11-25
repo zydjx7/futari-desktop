@@ -1,35 +1,41 @@
-# FUTARI 桌面应用
+# FUTARI Desktop · 焦糖兔
 
-一个桌宠，两套原生窗口与快捷键实现。网站源码在 [futari-web](https://github.com/zydjx7/futari-web)。
+焦糖兔是一个可以离线饲养的 Windows 和 macOS 桌宠。轻点兔子可以摸摸它的头，双击它就能翻开手账，喂它吃草、给它摆窝，或挑一张陪工时用的场景壁纸。[FUTARI 网页版源码](https://github.com/zydjx7/futari-web)
 
-## 下载
+## 下载与启动
 
-从 [GitHub Releases](https://github.com/zydjx7/futari-desktop/releases/latest) 的 Assets 下载已发布的平台包。也可以直接克隆源码，在本机编译。
-
-0.2.8 同时提供 macOS 通用包和 Windows x64 包。兔子在亚麻软窝里会更靠近软垫中央，点按回窝和自动休息使用同一位置。
-
-| 系统 | 文件名 | 快捷键（小兔层级 / 壁纸） |
+| 系统 | 下载 | 启动方式 |
 | --- | --- | --- |
-| Windows x64 | FUTARI-Desktop-Windows-x64.zip | Alt+Q / Alt+W |
-| macOS 12+，Apple Silicon 与 Intel | FUTARI-Desktop-macOS.zip | ⌥J / ⌥K |
+| Windows x64 | [Windows 0.2.6 ZIP](https://github.com/zydjx7/futari-desktop/releases/download/v0.2.6/FUTARI-Desktop-Windows-x64.zip) | 解压整个文件夹，保留其中的 `scenes` 目录，双击 `FUTARI Desktop.exe`。需要 WebView2 运行时。 |
+| macOS 12 及以上 | [macOS 0.2.8 通用 ZIP](https://github.com/zydjx7/futari-desktop/releases/download/v0.2.8/FUTARI-Desktop-macOS.zip) | 解压后将 `FUTARI Desktop.app` 拖入「应用程序」。Apple Silicon 和 Intel Mac 使用同一个包。 |
 
-Windows 解压整个目录，双击 FUTARI Desktop.exe。Mac 解压后把 FUTARI Desktop.app 拖到「应用程序」。压缩包附有对应系统的使用说明。
+两个平台分别发布。其他版本和更新记录见 [GitHub Releases](https://github.com/zydjx7/futari-desktop/releases)。
+
+## 桌面操作
+
+| 操作 | Windows | macOS |
+| --- | --- | --- |
+| 循环切换小兔状态（隐身 → 仅在桌面 → 悬浮置顶） | `Alt + Q` | `Option + J` |
+| 开关场景壁纸 | `Alt + W` | `Option + K` |
+| 打开手账 | 双击或右键点击兔子 | 双击或辅助点按兔子 |
+
+兔子隐身后也能用快捷键叫回来，或点击 Windows 系统托盘、macOS 菜单栏里的兔子图标切换状态。喂食、布置兔窝和自定义场景的详细操作见 [Windows 使用说明](desktop/使用说明.txt) 和 [macOS 使用说明](desktop/使用说明-macOS.txt)。
 
 ## 从源码构建
 
-本仓库为私有仓库，克隆需要有访问权限的 GitHub 账号。获取开发分支：
+本仓库公开，可直接克隆。构建环境使用 Node.js 24 和 Rust stable。Windows 需要 Visual Studio C++ Build Tools 和 WebView2，macOS 需要 Xcode Command Line Tools。
 
 ```sh
 git clone https://github.com/zydjx7/futari-desktop.git
 cd futari-desktop
 ```
 
-已配置 GitHub SSH 密钥时，克隆地址也可使用 `git@github.com:zydjx7/futari-desktop.git`。要复现某次发行，从仓库根目录切换到对应标签，例如 `git switch --detach v0.2.4`。日后跟进开发分支，运行 `git switch main` 和 `git pull --ff-only`。
+在仓库根目录运行对应平台的命令。构建完成后，ZIP 包位于 `desktop/dist/`。
 
-使用 Node.js 24 和 Rust stable。Mac 需要 Xcode Command Line Tools，Windows 需要 Visual Studio C++ Build Tools 和 WebView2。从仓库根目录运行：
+| 构建目标 | 命令 |
+| --- | --- |
+| Windows x64（PowerShell） | `.\desktop\scripts\build.ps1` |
+| 当前 Mac 架构 | `bash desktop/scripts/build-macos.sh` |
+| macOS 通用包（Apple Silicon 和 Intel） | `bash desktop/scripts/build-macos.sh --universal` |
 
-- Windows PowerShell：`./desktop/scripts/build.ps1`
-- 当前 Mac 架构：`bash desktop/scripts/build-macos.sh`
-- Mac 通用包：`bash desktop/scripts/build-macos.sh --universal`
-
-产物在 `desktop/dist/`。两端共用 `desktop/ui/` 和 `src/modules/` 的兔子行为与美术资源。原生实现位于 `desktop/src-tauri/src/platform/`。
+桌面界面位于 [desktop/ui](desktop/ui)，共用模块位于 [src/modules](src/modules)，两个平台的原生窗口和快捷键实现位于 [desktop/src-tauri/src/platform](desktop/src-tauri/src/platform)。
