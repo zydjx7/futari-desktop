@@ -255,6 +255,13 @@ fn build_window(app: &AppHandle, label: &str, file: &str) -> tauri::Result<Webvi
         format!("/{file}")
     };
     let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(file.into()));
+    // Keep canvas alpha through WebKit so translucent fur blends with the desktop.
+    #[cfg(target_os = "macos")]
+    let builder = if stage || label == "furnishings" {
+        builder.background_color(tauri::webview::Color(0, 0, 0, 0))
+    } else {
+        builder
+    };
     #[cfg(windows)]
     let builder = builder
         .transparent(true)

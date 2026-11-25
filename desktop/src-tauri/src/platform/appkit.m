@@ -1,9 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <Carbon/Carbon.h>
-#import <WebKit/WebKit.h>
 #import <ApplicationServices/ApplicationServices.h>
-#import <CoreImage/CoreImage.h>
-#import <QuartzCore/QuartzCore.h>
 #import <math.h>
 #import <stdbool.h>
 
@@ -211,27 +208,6 @@ void ft_ground(bool enabled) {
         }];
     });
 }
-static WKWebView *webview(NSView *v){
-    if([v isKindOfClass:WKWebView.class])return (WKWebView *)v;
-    for(NSView *child in v.subviews){WKWebView *found=webview(child);if(found)return found;}
-    return nil;
-}
-// WKWebView on macOS 12 paints an opaque page backing. A local green matte
-// and public Core Image color cube recover canvas alpha, including partial edges.
-static CIFilter *matteFilter(void){
-    const int n=32;
-    NSMutableData *data=[NSMutableData dataWithLength:n*n*n*4*sizeof(float)];
-    float *out=data.mutableBytes;
-    for(int b=0;b<n;b++)for(int g=0;g<n;g++)for(int r=0;r<n;r++){
-        float red=(float)r/(n-1),green=(float)g/(n-1),blue=(float)b/(n-1);
-        float spill=fmaxf(0,green-fmaxf(red,blue));
-        float key=fmaxf(0,(spill-.2f)/.8f);
-        *out++=red;*out++=fmaxf(0,green-key);*out++=blue;*out++=1-key;
-    }
-    CIFilter *filter=[CIFilter filterWithName:@"CIColorCube"];
-    [filter setValue:@(n) forKey:@"inputCubeDimension"];[filter setValue:data forKey:@"inputCubeData"];
-    return filter;
-}
 void ft_wallpaper(intptr_t window,bool visible,bool above) {
     mainSync(^{
         NSWindow *w=(__bridge NSWindow *)(void *)window;
@@ -246,13 +222,7 @@ void ft_furnishings(intptr_t window,bool visible) {
     mainSync(^{
         NSWindow *w=(__bridge NSWindow *)(void *)window;
         if (!visible) { [(FTHitView *)propPanel.contentView clearHit]; [w orderOut:nil]; return; }
-        if (!w.contentView.contentFilters.count) {
-            WKWebView *web=webview(w.contentView);
-            web.underPageBackgroundColor=NSColor.clearColor;
-            w.opaque=NO; w.backgroundColor=NSColor.clearColor;
-            w.contentView.wantsLayer=YES;
-            w.contentView.contentFilters=@[matteFilter()];
-        }
+        w.opaque=NO; w.backgroundColor=NSColor.clearColor;
         ft_wallpaper(window,true,true);
         if(propPanel.visible) [propPanel orderWindow:NSWindowAbove relativeTo:w.windowNumber];
     });
@@ -260,7 +230,6 @@ void ft_furnishings(intptr_t window,bool visible) {
 void ft_present(intptr_t window,bool visible,bool active,bool top,bool desktop) {
     mainSync(^{
         NSWindow *w=(__bridge NSWindow *)(void *)window;
-        BOOL fresh=stage!=w;
         stage=w;interactive=active;
         if(desktop && !finderTimer){
             finderTimer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer){
@@ -276,12 +245,6 @@ void ft_present(intptr_t window,bool visible,bool active,bool top,bool desktop) 
         w.opaque=NO;w.backgroundColor=NSColor.clearColor;w.hasShadow=NO;
         w.ignoresMouseEvents=!active;
         w.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorStationary|NSWindowCollectionBehaviorIgnoresCycle;
-        if(fresh || !w.contentView.contentFilters.count){
-            WKWebView *web=webview(w.contentView);
-            web.underPageBackgroundColor=NSColor.clearColor;
-            w.contentView.wantsLayer=YES;
-            w.contentView.contentFilters=@[matteFilter()];
-        }
         w.level=top ? NSFloatingWindowLevel : CGWindowLevelForKey(kCGDesktopIconWindowLevelKey)+2;
         [w setFrame:target().frame display:YES];
         if(active && (top || ft_desktop())){[NSApp activateIgnoringOtherApps:YES];[w makeKeyAndOrderFront:nil];}

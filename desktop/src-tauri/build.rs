@@ -10,11 +10,8 @@ fn main() {
         for framework in [
             "AppKit",
             "Carbon",
-            "WebKit",
             "CoreGraphics",
             "ApplicationServices",
-            "CoreImage",
-            "QuartzCore",
         ] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }

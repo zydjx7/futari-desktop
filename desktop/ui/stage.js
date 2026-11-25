@@ -34,7 +34,6 @@ import {
 const { invoke } = window.__TAURI__.core,
   { listen } = window.__TAURI__.event;
 
-if (/Mac/.test(navigator.platform)) document.documentElement.classList.add("appkit-stage");
 
 const world = document.querySelector("#world"),
   pet = document.querySelector("#pet"),

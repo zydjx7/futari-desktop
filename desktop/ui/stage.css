@@ -9,7 +9,6 @@ body {
   background: transparent;
   overflow: hidden;
 }
-html.appkit-stage { background: #00ff00; }
 canvas {
   position: absolute;
   pointer-events: none;

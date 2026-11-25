@@ -1,4 +1,8 @@
 const entry = document.querySelector("script[data-entry]").dataset.entry;
+// The native Mac overlay uses real alpha even when a signed 0.2.8 UI paints a green matte.
+if (/Mac/.test(navigator.platform) && (entry === "stage" || entry === "furnishings")) {
+  document.documentElement.style.setProperty("background-color", "transparent", "important");
+}
 const invoke = window.__TAURI__.core.invoke;
 async function load(base) {
   await Promise.all(

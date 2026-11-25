@@ -1,5 +1,4 @@
 import { furnitureChannel } from "./furniture-channel.js";
-if (/Mac/.test(navigator.platform)) document.documentElement.classList.add("appkit-stage");
 
 const publish = furnitureChannel(data => {
   if (!Array.isArray(data?.tiles)) return;
