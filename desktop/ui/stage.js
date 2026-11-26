@@ -779,23 +779,17 @@ function handlePick(pick, x, y) {
 }
 
 function copyFrame(targetCanvas, cropBox) {
-  const w = innerWidth,
-    h = innerHeight;
-  const sx = world.width / w,
-    sy = world.height / h;
-  targetCanvas
-    .getContext("2d", { alpha: false })
-    .drawImage(
-      world,
-      cropBox.x * sx,
-      cropBox.y * sy,
-      cropBox.side * sx,
-      cropBox.side * sy,
-      0,
-      0,
-      targetCanvas.width,
-      targetCanvas.height,
-    );
+  const ctx = targetCanvas.getContext("2d");
+  const { width, height } = targetCanvas;
+  ctx.clearRect(0, 0, width, height);
+  for (const layer of [world, pet]) {
+    if (layer.hidden) continue;
+    const rect = layer.getBoundingClientRect();
+    if (!rect.width || !rect.height) continue;
+    ctx.drawImage(layer, (rect.left - cropBox.x) * width / cropBox.side,
+      (rect.top - cropBox.y) * height / cropBox.side,
+      rect.width * width / cropBox.side, rect.height * height / cropBox.side);
+  }
 }
 
 function poseIn(cropBox) {
@@ -1012,7 +1006,7 @@ const cameraSceneProxy = {
       id: crypto.randomUUID(),
       captured: +now,
       offset: -now.getTimezoneOffset(),
-      scene: view.desktopCamera ? "desktop" : currentSceneId === "snow-forest" ? "snow" : "paper",
+      scene: (view.desktopCamera || currentSceneId === "overlay" || currentSceneId === "desktop") ? "desktop" : currentSceneId === "snow-forest" ? "snow" : "paper",
       light: currentLight,
       pose: poseIn(cropBox),
       title: "",
@@ -1068,11 +1062,12 @@ async function apply(v) {
   if (!v.visible || v.selecting) stop();
 
   cameraHost.classList.toggle("desktop-camera", v.desktopCamera);
-  const fullHabitat = !v.desktopCamera && (v.camera || (v.wallActive && (v.settings.mode === "desktop" || v.placed.length > 0)));
+  const macCamera = v.camera && /Mac/.test(navigator.platform);
+  const fullHabitat = !v.desktopCamera && ((v.camera && (!macCamera || v.wallActive)) || (v.wallActive && (v.settings.mode === "desktop" || v.placed.length > 0)));
   const desktopProps = !v.desktopCamera && !fullHabitat && v.placed.length > 0;
   let targetScene = desktopProps ? "desktop" : "overlay";
   if (fullHabitat) {
-    targetScene = v.settings.scene === "clear" ? (v.camera ? "paper" : "snow-forest") : v.settings.scene;
+    targetScene = v.settings.scene === "clear" ? (v.camera && !macCamera ? "paper" : "snow-forest") : v.settings.scene;
   }
   const key =
     targetScene + (v.camera ? ":camera:" : ":pet:") +

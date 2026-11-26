@@ -23,6 +23,20 @@ async function load(base) {
 const info = await invoke("ui_bundle_info");
 try {
   await load(info.active ? info.origin + "/" : import.meta.url);
+  // Older signed notebooks already handle the check action but hide it in local mode.
+  if (info.active && entry === "card") {
+    const page = document.querySelector("#page");
+    function restoreLocalCheck() {
+      if (!page.querySelector('[data-action="local"]') || page.querySelector('[data-action="check-update"]')) return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.action = "check-update";
+      button.textContent = "检查更新";
+      page.append(button);
+    }
+    new MutationObserver(restoreLocalCheck).observe(page, { childList: true });
+    restoreLocalCheck();
+  }
 } catch (error) {
   if (!info.active) throw error;
   await invoke("ui_bundle_rollback", { version: info.active });

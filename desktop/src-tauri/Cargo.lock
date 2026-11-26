@@ -1018,6 +1018,7 @@ dependencies = [
  "cc",
  "ed25519-dalek",
  "libc",
+ "quick-xml",
  "reqwest 0.12.28",
  "security-framework",
  "semver",

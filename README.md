@@ -7,7 +7,7 @@
 | 系统 | 下载 | 启动方式 |
 | --- | --- | --- |
 | Windows x64 | [Windows 0.2.6 ZIP](https://github.com/zydjx7/futari-desktop/releases/download/v0.2.6/FUTARI-Desktop-Windows-x64.zip) | 解压整个文件夹，保留其中的 `scenes` 目录，双击 `FUTARI Desktop.exe`。需要 WebView2 运行时。 |
-| macOS 12 及以上 | [macOS 0.2.8 通用 ZIP](https://github.com/zydjx7/futari-desktop/releases/download/v0.2.8/FUTARI-Desktop-macOS.zip) | 解压后将 `FUTARI Desktop.app` 拖入「应用程序」。Apple Silicon 和 Intel Mac 使用同一个包。 |
+| macOS 12 及以上 | [macOS 0.2.9 通用 ZIP](https://github.com/zydjx7/futari-desktop/releases/download/v0.2.9/FUTARI-Desktop-macOS.zip) | 解压后将 `FUTARI Desktop.app` 拖入「应用程序」。Apple Silicon 和 Intel Mac 使用同一个包。 |
 
 两个平台分别发布。其他版本和更新记录见 [GitHub Releases](https://github.com/zydjx7/futari-desktop/releases)。
 

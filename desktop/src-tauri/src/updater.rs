@@ -239,15 +239,27 @@ pub fn apply_ui_update(app: AppHandle) -> Result<()> {
 }
 #[tauri::command]
 pub async fn check_update(app: AppHandle) -> Result<()> {
+    check(app, true).await
+}
+pub async fn check_on_start(app: AppHandle) -> Result<()> {
+    check(app, false).await
+}
+async fn check(app: AppHandle, manual: bool) -> Result<()> {
     let a = app.state::<App>();
     let _account = a.account.lock().await;
-    {
+    let cloud = {
         let c = a.core();
-        if c.locked || !c.store.settings().cloud {
+        if c.locked || (!manual && !c.store.settings().cloud) {
             return Ok(());
         }
-    }
-    let Some(r) = a.cloud.manifest().await?.ui else {
+        c.store.settings().cloud
+    };
+    let github = if cloud { None } else { Some(crate::github_updates::Github::new()?) };
+    let release = match &github {
+        Some(client) => client.latest().await?,
+        None => a.cloud.manifest().await?.ui,
+    };
+    let Some(r) = release else {
         return Ok(());
     };
     if semver::Version::parse(&r.min_app_version).map_err(err)?
@@ -273,7 +285,10 @@ pub async fn check_update(app: AppHandle) -> Result<()> {
     if a.core().locked {
         return Ok(());
     }
-    let bytes = a.cloud.bundle(&r.version).await?;
+    let bytes = match github {
+        Some(client) => client.bundle(&r.version).await?,
+        None => a.cloud.bundle(&r.version).await?,
+    };
     verify(&r, &bytes)?;
     let _g = LOCK.lock().unwrap();
     let mut s = state();
@@ -312,6 +327,15 @@ pub async fn check_update(app: AppHandle) -> Result<()> {
 pub fn serve(path: &str) -> tauri::http::Response<Vec<u8>> {
     let name = path.strip_prefix('/').unwrap_or("");
     let data = active_file(name).and_then(|p| fs::read(p).ok());
+    // The November signed UI shipped the old camera controller. Serve the fixed
+    // controller at the same URL so its imports still use the signed atlas and layouts.
+    #[cfg(target_os = "macos")]
+    let data = data.map(|bytes| {
+        if name == "stage.js" && format!("{:x}", Sha256::digest(&bytes)) ==
+            "bd4e1db222d082830d51c2c817426b227c645a8a6f6855547beb6d7483e15d18" {
+            include_bytes!("../../ui/stage.js").to_vec()
+        } else { bytes }
+    });
     let mime = match name.rsplit('.').next() {
         Some("js") => "text/javascript",
         Some("css") => "text/css",

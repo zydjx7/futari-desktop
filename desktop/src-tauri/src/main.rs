@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod album;
 mod updater;
-use updater::check_update;
+mod github_updates;
 #[cfg(feature = "cloud-sync")]
 mod cloud;
 #[cfg(not(feature = "cloud-sync"))]
@@ -914,8 +914,8 @@ async fn open_camera_mode(app: &AppHandle, moment: Option<String>) -> Result<()>
         album::checked_moment(m)?;
     }
     let state = app.state::<App>();
-    let needs_snow = matches!(moment.as_deref(), Some("stump" | "nap"));
-    let needs_night = matches!(moment.as_deref(), Some("nap"));
+    let needs_snow = !cfg!(target_os = "macos") && matches!(moment.as_deref(), Some("stump" | "nap"));
+    let needs_night = !cfg!(target_os = "macos") && matches!(moment.as_deref(), Some("nap"));
     if needs_night {
         let _guard = state.account.lock().await;
         let online = state.core().store.settings().cloud;
@@ -1293,7 +1293,7 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
         }
     });
     let updater_handle=app.handle().clone();
-    tauri::async_runtime::spawn(async move { tokio::time::sleep(std::time::Duration::from_secs(5)).await;let _=check_update(updater_handle).await; });
+    tauri::async_runtime::spawn(async move { tokio::time::sleep(std::time::Duration::from_secs(5)).await;let _=updater::check_on_start(updater_handle).await; });
     sync(app.handle(), true);
     if app.state::<App>().core().store.settings().cloud {
         let handle = app.handle().clone();

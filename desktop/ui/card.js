@@ -404,7 +404,7 @@ function paint() {
       ),
     );
   page.append(el("small","桌宠 "+updateState.app+" · 资源 "+(updateState.active || "内置")));
-  if(s.cloud) page.append(button("check-update","检查更新"));
+  page.append(button("check-update","检查更新"));
   if(updateState.pending) page.append(button("apply-update","发现新内容，刷新兔窝生效"));
   if (cloudForm) {
     const form = el("form");
